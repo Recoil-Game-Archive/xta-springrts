@@ -443,11 +443,22 @@ local function SetHover(kind, cmd)
 	hovered = cmd and { kind = kind, cmd = cmd } or nil
 end
 
+local DEBUG_CLICKS = true -- TEMPORARY: logs every button press to infolog.txt
+
 local function Apply(cmd, button)
 	local index = spGetCmdDescIndex(cmd.id)
+	if DEBUG_CLICKS then
+		Spring.Echo(string.format("[Slate click] cmd %d '%s' type %d disabled=%s -> cmddesc index %s",
+			cmd.id, tostring(cmd.name), cmd.type, tostring(cmd.disabled), tostring(index)))
+	end
 	if not index then return end
 	local alt, ctrl, meta, shift = spGetModKeyState()
-	spSetActiveCommand(index, button, button == 1, button == 3, alt, ctrl, meta, shift)
+	local ok = spSetActiveCommand(index, button, button == 1, button == 3, alt, ctrl, meta, shift)
+	if DEBUG_CLICKS then
+		local _, activeID = spGetActiveCommand()
+		Spring.Echo(string.format("[Slate click] SetActiveCommand(%d, button %d) -> %s; active command now %s",
+			index, button, tostring(ok), tostring(activeID)))
+	end
 end
 
 -- RmlUi numbers the buttons left 0, right 1, middle 2; the engine 1, 3, 2
@@ -460,6 +471,11 @@ local function Listen(containerId, attribute, kind, list)
 		local index = hud.EventAttribute(event, attribute)
 		local cmd = index and list()[index]
 		local button = ENGINE_BUTTON[event.parameters and event.parameters.button]
+		if DEBUG_CLICKS then
+			Spring.Echo(string.format("[Slate click] mousedown on %s: %s=%s cmd=%s rml button=%s hotbind=%s",
+				containerId, attribute, tostring(index), tostring(cmd and cmd.id), tostring(event.parameters and event.parameters.button),
+				tostring(WG.SlateHotbind and WG.SlateHotbind.IsCapturing and WG.SlateHotbind.IsCapturing())))
+		end
 		if not cmd or not button then return end
 		-- a click while the hotbind prompt is up cancels the prompt and does
 		-- nothing else, so a mis-triggered capture never eats a build order
