@@ -100,7 +100,11 @@ end
 -- config
 --------------------------------------------------------------------------------
 
-local OPTIONS_DIR   = "LuaUI/configs/options/"
+-- Every *.lua file in these folders is one tab (see HOW OPTIONS ARE DEFINED).
+local OPTIONS_DIRS  = {
+	"LuaUI/slate/configs/options/",  -- Slate's own tabs
+	"LuaUI/configs/slate_options/",  -- a game's extra tabs, outside the Slate folder
+}
 local DOCUMENT_PATH = "options.rml"
 
 -- must match #options in options.rml

@@ -41,7 +41,10 @@ local QUEUE_INTERVAL = 0.25
 local PANEL_WIDTH  = 300
 local BUILD_HEIGHT = 452
 local PAD          = 10
+local BORDER       = 1  -- .panel border in theme.rcss; inside the border-box width
 local GAP          = 6
+-- the width the rows of tiles have to fit in
+local INNER_WIDTH  = PANEL_WIDTH - PAD * 2 - BORDER * 2
 local HEADER_H     = 28
 local CHIP_H       = 30
 local ORDER_HEAD_H = 22
@@ -235,9 +238,8 @@ end
 local function TileSize()
 	local cols = S.game.buildColumns or 4
 	local rows = S.game.buildRows or 5
-	local inner = PANEL_WIDTH - PAD * 2
-	local w = floor((inner - GAP * (cols - 1)) / cols)
-	local avail = BUILD_HEIGHT - PAD * 2 - HEADER_H - GAP - ((#chips > 0) and (CHIP_H + GAP) or 0)
+	local w = floor((INNER_WIDTH - GAP * (cols - 1)) / cols)
+	local avail = BUILD_HEIGHT - PAD * 2 - BORDER * 2 - HEADER_H - GAP - ((#chips > 0) and (CHIP_H + GAP) or 0)
 	local h = floor((avail - GAP * (rows - 1)) / rows)
 	return cols, rows, w, min(w, h)
 end
@@ -295,9 +297,8 @@ end
 local function ShowOrders()
 	local oCols = S.game.orderColumns or 5
 	local sCols = S.game.stateColumns or 4
-	local inner = PANEL_WIDTH - PAD * 2
-	local ow = floor((inner - GAP * (oCols - 1)) / oCols)
-	local sw = floor((inner - GAP * (sCols - 1)) / sCols)
+	local ow = floor((INNER_WIDTH - GAP * (oCols - 1)) / oCols)
+	local sw = floor((INNER_WIDTH - GAP * (sCols - 1)) / sCols)
 
 	local parts = {}
 	for i = 1, #orders do
@@ -350,7 +351,7 @@ local function ShowOrders()
 
 	-- the panel is as tall as its rows need
 	local oRows, sRows = ceil(#orders / oCols), ceil(#states / sCols)
-	local h = PAD * 2 + ORDER_HEAD_H + GAP + oRows * (ORDER_H + GAP) + sRows * (STATE_H + GAP)
+	local h = PAD * 2 + BORDER * 2 + ORDER_HEAD_H + GAP + oRows * (ORDER_H + GAP) + sRows * (STATE_H + GAP)
 	return max(ORDER_MIN_H, h)
 end
 
