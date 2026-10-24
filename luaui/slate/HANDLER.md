@@ -41,6 +41,11 @@ top of the file, so further folders can be added in one place.)
 
 ## 2. `luaui/main.lua`: make sure the game's handler is the one that runs
 
+Also make sure `main.lua` includes the engine's `rml_setup.lua` (the stock
+one does: `VFS.Include(LUAUI_DIRNAME .. "rml_setup.lua", nil, VFS.ZIP)`), or
+RmlUi has no contexts and Slate's documents cannot load.
+
+
 Engine installs usually carry their own loose `LuaUI/widgets.lua`. The stock
 `main.lua` loads the handler with
 
@@ -67,7 +72,8 @@ VFS.Include(LUAUI_DIRNAME .. 'main.lua', nil, VFS.ZIP_FIRST)
 Start a game and open the widget list (F11). The entries whose names start with
 "Slate" should be listed and on. If the engine's plain resource bar and build
 menu are showing instead, the handler from step 1 is not the one being run;
-recheck step 2.
+recheck step 2. If the Slate widgets are listed but nothing is drawn, look in
+infolog.txt for "[Slate" lines: a document that failed to load says why.
 
 ## Removing Slate
 

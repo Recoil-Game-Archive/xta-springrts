@@ -1,11 +1,13 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. This widget draws nothing and does not need
+-- RmlUi: it only carries messages for the players list.
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Broadcast",
 		desc    = "Tells the other players' Slate your frame rate, system and camera position, and collects theirs for the players list (FPS column, system details, click-to-follow for spectators). Only works between players running Slate.",
 		author  = "Scary le Poo",
-		date    = "2026-10-10",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = -99000,
 		enabled = true,
@@ -31,8 +33,11 @@ end
 --   .now()             that same clock
 --
 -- The player can stop sending with the "Broadcast my camera, FPS and system"
--- setting (theme key `broadcast`). Receiving always works.
+-- setting (WG.Slate.Get("broadcast"), also "/slate broadcast"). Receiving
+-- always works.
 --------------------------------------------------------------------------------
+
+local OWNER = "slate_broadcast" -- our name with WG.Slate.OnChange
 
 local PREFIX = "slate|"
 local FPS_PERIOD    = 4
@@ -53,9 +58,17 @@ data.now = function() return clock end
 -- Sending
 --------------------------------------------------------------------------------
 
-local function Enabled()
+-- The setting is read once and again whenever Slate Core says a setting
+-- changed, not every frame. Without Slate Core it is on.
+local enabled = true
+
+local function ReadSetting()
 	local S = WG.Slate
-	return not (S and S.theme and S.theme.broadcast == false)
+	if S and S.Get then
+		enabled = S.Get("broadcast") and true or false
+	else
+		enabled = true
+	end
 end
 
 local function Clean(s)
@@ -143,17 +156,39 @@ end
 
 local wasEnabled = true
 
+-- Slate Core normally starts first (its layer is lower), but it may also be
+-- switched on later: the listener is attached whenever it turns up.
+local listening = false
+
+local function Listen()
+	local S = WG.Slate
+	if S and S.OnChange then
+		S.OnChange(OWNER, ReadSetting)
+		listening = true
+	else
+		listening = false
+	end
+	ReadSetting()
+end
+
 function widget:Initialize()
 	WG.SlateBroadcast = data
+	Listen()
 end
 
 function widget:Shutdown()
+	local S = WG.Slate
+	if S and S.OffChange then
+		S.OffChange(OWNER)
+	end
 	WG.SlateBroadcast = nil
 end
 
 function widget:Update(dt)
 	clock = clock + dt
-	local enabled = Enabled()
+	if not listening and WG.Slate then
+		Listen()
+	end
 	if enabled ~= wasEnabled then
 		wasEnabled = enabled
 		if not enabled then

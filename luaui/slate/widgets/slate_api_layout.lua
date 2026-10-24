@@ -1,114 +1,83 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--
+--  Layout of the Slate interface: where each panel is, when the player has moved
+--  it, and the tweak mode (Ctrl+F11) in which panels are dragged around.
+--
+--  HOW A PANEL WIDGET USES THIS
+--
+--  Through luaui/slate/rml/core.lua: hud.PlacePanel(element, name, widthDp, heightDp,
+--  defaultOrigin) asks WG.SlateLayout.Place for the panel's place (the
+--  player's, if they moved it, or else the default passed in), and
+--  hud.RegisterPanel(name, label, onMove, isVisible) gives the panel a label
+--  in tweak mode and a function to call after it has been dropped somewhere
+--  new. The widget owns its geometry; this module owns the origin of that
+--  geometry, and only when the player has moved it.
+--
+--  HOW POSITIONS ARE STORED
+--
+--  Not as pixels. Each moved rect is stored as (anchor corner, offset from
+--  that corner) where the anchor is the screen corner nearest the rect's centre
+--  at drop time and the offset is measured from the anchor corner to the
+--  rect's matching corner, in units of uiScale (vsy / 1080). A panel dropped
+--  40 scaled pixels in from the bottom-right stays 40 scaled pixels in from
+--  the bottom-right on every resolution, and a panel whose height varies
+--  (players list) grows away from its anchor edge instead of drifting.
+--
+--  TWEAK MODE
+--
+--  While the widget handler is in tweak mode this widget shows an RmlUi
+--  overlay over everything: one rectangle per panel, named, to drag. A right
+--  click puts a panel back in its default place; "Reset all" (or
+--  /resetlayout) does that for every panel. "Done" or Esc leaves tweak mode.
+--
+--  The overlay has to be RmlUi: the engine draws RmlUi over everything a
+--  widget draws with gl and gives it the mouse first, so a gl overlay (as in
+--  the old module) would sit under the panels it is meant to move.
+--
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Layout",
-		desc    = "Tweak-mode (Ctrl+F11) drag/reposition for every Slate panel. Owns anchor-relative position persistence so the panel widgets never have to.",
+
+		desc    = "Tweak mode (Ctrl+F11): drag any HUD panel to a new place. Remembers where panels were put. ",
 		author  = "Scary le Poo",
-		date    = "2026-08-25",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
-		layer   = -99999,    -- after slate_api_draw (-100000), before every panel widget
+		layer   = -99999,    -- before every panel widget
 		enabled = true,
 		handler = true,
 	}
 end
 
---------------------------------------------------------------------------------
---
--- HOW A PANEL WIDGET USES THIS
---
--- 1. Bind once (same shim pattern as BindDrawing):
---
---        local L = WG.SlateLayout
---        local LayoutPlace = L and L.Place or function(_, x, y) return x, y end
---
--- 2. In the geometry builder, right where the default origin is computed from
---    vsx/vsy, route it through Place. Pass the panel's default bottom-left
---    corner and its size; get back the effective bottom-left corner:
---
---        x1, y1 = LayoutPlace("playerslist", x1, y1, pw, ph)
---
---    Place records the live rect (for hit-testing and the tweak overlay) and
---    returns the user's stored position if one exists, otherwise the default.
---    Everything downstream of the origin works unchanged.
---
--- 3. In Initialize, register so the module can label the rect in the overlay
---    and tell the widget to rebuild after a drop:
---
---        if L then L.Register("playerslist", {
---            label  = "Players List",
---            onMove = function() widget:ViewResize(vsx, vsy) end,
---        }) end
---
---    and in Shutdown:  if L then L.Unregister("playerslist") end
---
--- That is the whole contract. The widget owns its geometry; this module owns
--- the *origin* of that geometry, and only when the user has moved it.
---
---
--- HOW POSITIONS ARE STORED
---
--- Not as pixels. Each moved rect is stored as (anchor corner, offset from
--- that corner) where the anchor is the screen corner nearest the rect's centre
--- at drop time and the offset is measured from the anchor corner to the
--- rect's matching corner, in units of uiScale (vsy / 1080). A panel dropped
--- 40 scaled pixels in from the bottom-right stays 40 scaled pixels in from
--- the bottom-right on every resolution, and a panel whose height varies
--- (players list) grows away from its anchor edge instead of drifting.
---
---
--- TWEAK MODE
---
--- The widget handler routes mouse input to the Tweak* callins when tweak
--- mode is on (Ctrl+F11). Only this widget defines them, so there is nothing
--- to arbitrate: it hit-tests against every rect that has been Placed, drags
--- a ghost outline, and on release stores the new anchor/offset and fires the
--- owner's onMove. Right-click on a rect resets it to its default.
--- /resetlayout resets all of them.
---
--- Dragging a ghost rather than the live panel is deliberate: TexCache blits
--- would follow a moved origin for free, but text drawn outside the cache and
--- every hit-rect would not, and SG.SetOffset does not reach font:Print. One
--- rebuild on drop is correct for every widget without touching a draw path.
---
---------------------------------------------------------------------------------
+local DOCUMENT_PATH = "layout.rml"
 
 local spGetViewGeometry = Spring.GetViewGeometry
 local spGetMouseState   = Spring.GetMouseState
 local spEcho            = Spring.Echo
+
 local math_floor        = math.floor
 local math_max          = math.max
 local math_min          = math.min
 local math_abs          = math.abs
 
 local BASE_RESOLUTION   = 1080
-local FONT_FILE         = LUAUI_DIRNAME .. "slate/fonts/" .. Spring.GetConfigString("ui_font", "Saira_SemiCondensed-SemiBold.ttf")
-
--- Overlay colours (guishader-agnostic; the overlay only exists in tweak mode)
-local COL_DIM       = { 0.00, 0.00, 0.00, 0.35 }
-local COL_FILL      = { 0.20, 0.55, 0.95, 0.18 }
-local COL_FILL_HOT  = { 0.20, 0.55, 0.95, 0.32 }
-local COL_FILL_MOVED= { 0.95, 0.70, 0.20, 0.18 }
-local COL_OUTLINE   = { 0.45, 0.75, 1.00, 0.90 }
-local COL_OUTLINE_MV= { 1.00, 0.80, 0.30, 0.90 }
-local COL_GHOST     = { 1.00, 1.00, 1.00, 0.85 }
-local COL_TEXT      = { 1.00, 1.00, 1.00, 1.00 }
-local COL_TEXT_DIM  = { 0.85, 0.85, 0.85, 0.85 }
 
 --------------------------------------------------------------------------------
--- State
+-- state
 --------------------------------------------------------------------------------
 
 local vsx, vsy = spGetViewGeometry()
 local uiScale  = vsy / BASE_RESOLUTION
 
--- rects[name]  = { x1, y1, x2, y2, w, h, defX, defY, placedFrame }
+-- rects[name]  = { x1, y1, x2, y2, w, h, defX, defY }
 --   the live rect as of the last Place call, plus the default origin the
 --   owning widget passed in (so Reset can put it back without a rebuild
 --   round-trip).
 local rects = {}
-local rectOrder = {}     -- names in first-Place order, for stable overlay draw
+local rectOrder = {}     -- names in first-Place order
 
 -- registry[name] = { label, onMove, isVisible }
 local registry = {}
@@ -117,61 +86,17 @@ local registry = {}
 -- ox/oy are in uiScale units, measured from the anchor corner inward.
 local stored = {}
 
--- Drag state
-local drag = nil         -- { name, grabDX, grabDY, x1, y1 }
-local hover = nil
+local drag = nil         -- { name, grabDX, grabDY, x1, y1 } while a rectangle is being dragged
 
-local font = nil
-local fontSize = 14
-
---------------------------------------------------------------------------------
--- Drawing shim
---------------------------------------------------------------------------------
-
-local SG = nil
-local function BindDrawing()
-	SG = WG.SlateDraw
-	if SG and not SG.RoundedRect then SG = nil end
-end
-
-local function FillRect(x1, y1, x2, y2, col, radius)
-	if SG then
-		SG.RoundedRect(x1, y1, x2, y2, radius or 0, col)
-	else
-		gl.Color(col[1], col[2], col[3], col[4])
-		gl.Rect(x1, y1, x2, y2)
-	end
-end
-
-local function OutlineRect(x1, y1, x2, y2, col, width, radius)
-	if SG then
-		SG.RoundedOutline(x1, y1, x2, y2, radius or 0, col, width or 2)
-	else
-		gl.Color(col[1], col[2], col[3], col[4])
-		gl.LineWidth(width or 2)
-		gl.Shape(GL.LINE_LOOP, {
-			{ v = { x1, y1 } }, { v = { x2, y1 } },
-			{ v = { x2, y2 } }, { v = { x1, y2 } },
-		})
-		gl.LineWidth(1)
-	end
-end
-
-local function FlushShapes()
-	if SG and SG.Flush then SG.Flush() end
-end
-
-local function LoadOverlayFont()
-	if font then
-		gl.DeleteFont(font)
-		font = nil
-	end
-	fontSize = math_max(11, math_floor(14 * uiScale))
-	font = gl.LoadFont(FONT_FILE, fontSize, math_max(1, math_floor(3 * uiScale)), 1.6)
-end
+local hud
+local document
+local view
+local tweaking = false   -- the overlay is up
+local shownOrder = {}    -- names in the order of the overlay's rectangles: element i is "r<i>"
+local shownSignature
 
 --------------------------------------------------------------------------------
--- Position maths
+-- position maths (carried over)
 --------------------------------------------------------------------------------
 
 local function Clamp(v, lo, hi)
@@ -208,7 +133,7 @@ local function Decode(s, w, h)
 end
 
 --------------------------------------------------------------------------------
--- Public API
+-- public API (carried over)
 --------------------------------------------------------------------------------
 
 local L = {}
@@ -239,7 +164,6 @@ function L.Register(name, opts)
 	registry[name] = {
 		label     = opts.label or name,
 		onMove    = opts.onMove,
-		onResize  = opts.onResize,
 		isVisible = opts.isVisible,
 	}
 end
@@ -268,7 +192,7 @@ local function NotifyMove(name)
 	if reg and reg.onMove then
 		local ok, err = pcall(reg.onMove)
 		if not ok then
-			spEcho("[Slate layout] onMove for '" .. name .. "' failed: " .. tostring(err))
+			spEcho("[Slate Layout] onMove for '" .. name .. "' failed: " .. tostring(err))
 		end
 	end
 end
@@ -305,55 +229,126 @@ function L.ResetAll()
 		end
 		NotifyMove(name)
 	end
-	spEcho("[Slate layout] all panel positions reset")
+	spEcho("[Slate Layout] all panel positions reset")
 end
 
 --------------------------------------------------------------------------------
--- Hit testing
+-- the overlay
 --------------------------------------------------------------------------------
 
--- Panels registered with onResize get a grip in their bottom-right corner.
-local function GripRect(r)
-	local g = math_max(14, math_floor(20 * uiScale))
-	return r.x2 - g, r.y1, r.x2, r.y1 + g
-end
-
-local function GripAt(x, y)
+-- Largest first, so that a small panel lying on a large one is drawn over it
+-- and gets the mouse.
+local function OverlayOrder()
+	local names = {}
 	for _, name in ipairs(rectOrder) do
-		local r, reg = rects[name], registry[name]
-		if r and reg and reg.onResize then
-			local gx1, gy1, gx2, gy2 = GripRect(r)
-			if x >= gx1 and x <= gx2 and y >= gy1 and y <= gy2 then return name end
+		if rects[name] then
+			names[#names + 1] = name
 		end
 	end
-	return nil
+	table.sort(names, function(a, b)
+		local areaA, areaB = rects[a].w * rects[a].h, rects[b].w * rects[b].h
+		if areaA ~= areaB then
+			return areaA > areaB
+		end
+		return a < b
+	end)
+	return names
 end
 
--- Smallest rect under the cursor wins, so a small panel sitting on top of a
--- large one is still grabbable.
-local function RectAt(x, y)
-	local best, bestArea = nil, math.huge
-	for _, name in ipairs(rectOrder) do
+local function Refresh()
+	view.SetClass("tweak", "hidden", not tweaking)
+	if not tweaking then
+		return
+	end
+	-- the rectangles are rebuilt only when panels come, go or are renamed
+	local names = OverlayOrder()
+	local parts, signature = {}, {}
+	for i, name in ipairs(names) do
+		local reg = registry[name]
+		local label = hud.Escape(reg and reg.label or name)
+		parts[i] = string.format('<div id="r%d" class="rect" data-r="%d"><div class="rlabel">%s</div></div>', i, i, label)
+		signature[i] = name .. "=" .. label
+	end
+	signature = table.concat(signature, "|")
+	if signature ~= shownSignature then
+		shownSignature = signature
+		shownOrder = names
+		view.Element("rects").inner_rml = table.concat(parts)
+		view.Forget()
+		view.SetClass("tweak", "hidden", false)
+	end
+	for i, name in ipairs(shownOrder) do
 		local r = rects[name]
-		if r and x >= r.x1 and x <= r.x2 and y >= r.y1 and y <= r.y2 then
-			local area = r.w * r.h
-			if area < bestArea then
-				best, bestArea = name, area
+		if r then
+			local id = "r" .. i
+			local x1, y1 = r.x1, r.y1
+			local dragging = drag and drag.name == name
+			if dragging then
+				x1, y1 = drag.x1, drag.y1
 			end
+			view.SetStyle(id, "left", x1 .. "px")
+			view.SetStyle(id, "top", (vsy - (y1 + r.h)) .. "px")
+			view.SetStyle(id, "width", r.w .. "px")
+			view.SetStyle(id, "height", r.h .. "px")
+			local reg = registry[name]
+			view.SetClass(id, "moved", stored[name] ~= nil)
+			view.SetClass(id, "off", (reg and reg.isVisible and not reg.isVisible()) and true or false)
+			view.SetClass(id, "dragging", dragging and true or false)
 		end
 	end
-	return best
+end
+
+-- RmlUi numbers the buttons left 0, right 1
+local function OnRectMouseDown(event)
+	local index = hud.EventAttribute(event, "data-r")
+	local name = index and shownOrder[index]
+	local r = name and rects[name]
+	if not r then
+		return
+	end
+	local button = event.parameters and event.parameters.button
+	if button == 1 then
+		drag = nil
+		L.Reset(name)
+		Refresh()
+	elseif button == 0 then
+		local mx, my = spGetMouseState()
+		drag = { name = name, grabDX = mx - r.x1, grabDY = my - r.y1, x1 = r.x1, y1 = r.y1 }
+		Refresh()
+	end
+end
+
+-- The drop. (The engine does not report the button as held once RmlUi has
+-- taken the press, so the release has to come from RmlUi: "mouseup", or
+-- "dragend" when RmlUi saw the movement as a drag. Whichever comes first
+-- ends the drag; the other finds nothing to do.)
+local function OnRelease()
+	if not drag then
+		return
+	end
+	local d = drag
+	drag = nil
+	local r = rects[d.name]
+	-- a click without movement is not a move
+	if r and (math_abs(d.x1 - r.x1) >= 1 or math_abs(d.y1 - r.y1) >= 1) then
+		L.Set(d.name, d.x1, d.y1)
+		NotifyMove(d.name)
+	end
+	Refresh()
+end
+
+local function LeaveTweakMode()
+	drag = nil
+	widgetHandler.tweakMode = false
 end
 
 --------------------------------------------------------------------------------
--- Widget lifecycle
+-- widget api
 --------------------------------------------------------------------------------
 
 function widget:Initialize()
-	BindDrawing()
 	vsx, vsy = spGetViewGeometry()
 	uiScale  = vsy / BASE_RESOLUTION
-	LoadOverlayFont()
 
 	WG.SlateLayout = L
 
@@ -366,6 +361,35 @@ function widget:Initialize()
 	elseif widgetHandler.AddAction then
 		widgetHandler:AddAction("resetlayout", function() L.ResetAll() end, nil, "t")
 	end
+
+	-- The overlay. Positions are kept and served without it, so a document
+	-- that fails to load costs only the dragging.
+	local helpers = include("slate/rml/core.lua")
+	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		spEcho("[Slate Layout] " .. tostring(reason))
+		return
+	end
+	hud = helpers
+	document = result
+	view = hud.NewView(document)
+	view.Assume("tweak", "hidden", true) -- set in the markup
+
+	local container = view.Element("rects")
+	container:AddEventListener("mousedown", OnRectMouseDown)
+	local root = view.Element("tweak")
+	root:AddEventListener("mouseup", OnRelease)
+	root:AddEventListener("dragend", OnRelease)
+	hud.OnClick(view, "tweak-reset", function()
+		hud.Sound("click")
+		L.ResetAll()
+		Refresh()
+	end)
+	hud.OnClick(view, "tweak-done", function()
+		hud.Sound("click")
+		LeaveTweakMode()
+	end)
+	hud.ShowPassive(document)
 end
 
 function widget:Shutdown()
@@ -375,17 +399,50 @@ function widget:Shutdown()
 	elseif widgetHandler.RemoveAction then
 		widgetHandler:RemoveAction("resetlayout")
 	end
-	if font then gl.DeleteFont(font) end
-	font = nil
 	WG.SlateLayout = nil
+	if document then
+		hud.CloseDocument(document)
+		document = nil
+	end
 end
 
 function widget:ViewResize(nx, ny)
-	vsx, vsy = nx, ny
+	vsx, vsy = spGetViewGeometry()
 	uiScale  = vsy / BASE_RESOLUTION
-	LoadOverlayFont()
 	-- Panel widgets re-Place themselves from their own ViewResize; nothing to
 	-- do here. Stored positions are resolution-independent by construction.
+	if hud and document then
+		hud.UpdateScale()
+		view.ForgetStyles()
+	end
+end
+
+function widget:Update()
+	if not document then
+		return
+	end
+	local on = widgetHandler.tweakMode and true or false
+	if on ~= tweaking then
+		tweaking = on
+		drag = nil
+		if on then
+			pcall(function() document:PullToFront() end)
+		end
+		Refresh()
+	end
+	if not tweaking then
+		return -- idle cost stops here
+	end
+	if drag then
+		local r = rects[drag.name]
+		if r then
+			local mx, my = spGetMouseState()
+			drag.x1, drag.y1 = ClampOrigin(mx - drag.grabDX, my - drag.grabDY, r.w, r.h)
+		else
+			drag = nil
+		end
+	end
+	Refresh() -- a few dozen comparisons; windows open and close while tweaking
 end
 
 function widget:GetConfigData()
@@ -408,194 +465,4 @@ function widget:SetConfigData(data)
 			}
 		end
 	end
-end
-
---------------------------------------------------------------------------------
--- Tweak-mode input
---------------------------------------------------------------------------------
-
-function widget:TweakIsAbove(x, y)
-	return RectAt(x, y) ~= nil
-end
-
-function widget:TweakGetTooltip(x, y)
-	local name = RectAt(x, y)
-	if not name then return nil end
-	local reg = registry[name]
-	local label = reg and reg.label or name
-	if GripAt(x, y) == name then
-		return label .. "\nDrag the corner to resize."
-	end
-	if stored[name] then
-		return label .. "\nDrag to move. Right-click to reset."
-	end
-	return label .. "\nDrag to move."
-end
-
-function widget:TweakMousePress(x, y, button)
-	local grip = (button == 1) and GripAt(x, y)
-	if grip then
-		local r = rects[grip]
-		drag = { name = grip, resize = true, startX = x, startY = y, startW = r.w, startH = r.h, x1 = r.x1, y1 = r.y1 }
-		return true
-	end
-
-	local name = RectAt(x, y)
-	if not name then return false end
-	local r = rects[name]
-
-	if button == 3 then
-		L.Reset(name)
-		return true
-	end
-	if button ~= 1 then return false end
-
-	drag = {
-		name   = name,
-		grabDX = x - r.x1,
-		grabDY = y - r.y1,
-		x1     = r.x1,
-		y1     = r.y1,
-	}
-	return true
-end
-
-function widget:TweakMouseMove(x, y, dx, dy, button)
-	if not drag then return false end
-	local r = rects[drag.name]
-	if not r then drag = nil ; return false end
-	if drag.resize then
-		-- the grip is the bottom-right corner: down and right is bigger. The
-		-- owner applies the size straight away and re-Places itself.
-
-		local dy = drag.startY - y
-		local dx = (x - drag.startX) * drag.startH / math_max(1, drag.startW)
-		local d = (math_abs(dy) > math_abs(dx)) and dy or dx
-		local h = math_max(40 * uiScale, drag.startH + d)
-		local reg = registry[drag.name]
-		if reg and reg.onResize then
-			local ok, err = pcall(reg.onResize, h * drag.startW / math_max(1, drag.startH), h)
-			if not ok then spEcho("[Slate layout] onResize for '" .. drag.name .. "' failed: " .. tostring(err)) end
-		end
-		return true
-	end
-	drag.x1, drag.y1 = ClampOrigin(x - drag.grabDX, y - drag.grabDY, r.w, r.h)
-	return true
-end
-
-function widget:TweakMouseRelease(x, y, button)
-	if not drag then return false end
-	local d = drag
-	drag = nil
-	local r = rects[d.name]
-	if not r then return true end
-	if d.resize then return true end
-
-	-- A click without movement is not a move.
-	if math_abs(d.x1 - r.x1) < 1 and math_abs(d.y1 - r.y1) < 1 then
-		return true
-	end
-
-	L.Set(d.name, d.x1, d.y1)
-	NotifyMove(d.name)
-	return true
-end
-
---------------------------------------------------------------------------------
--- Tweak-mode overlay
---------------------------------------------------------------------------------
-
--- The handler has no separate TweakDrawScreen list: it walks DrawScreenList
--- and calls w:TweakDrawScreen() after w:DrawScreen() when tweak mode is on
--- (cont/LuaUI/widgets.lua, DrawScreen). A widget without DrawScreen is
--- never asked to draw its tweak overlay, so this stub must exist.
-function widget:DrawScreen()
-end
-
-local function DrawLabel(x1, y1, x2, y2, text, col)
-	if not font then return end
-	local cx = (x1 + x2) * 0.5
-	local cy = (y1 + y2) * 0.5 - fontSize * 0.35
-	font:Begin()
-	font:SetTextColor(col[1], col[2], col[3], col[4])
-	font:Print(text, cx, cy, fontSize, "co")
-	font:End()
-end
-
-function widget:TweakDrawScreen()
-	BindDrawing()   -- the shapes module can be toggled; cheap to re-resolve
-	local mx, my = spGetMouseState()
-	hover = drag and drag.name or RectAt(mx, my)
-
-	FillRect(0, 0, vsx, vsy, COL_DIM)
-
-	for _, name in ipairs(rectOrder) do
-		local r = rects[name]
-		if r then
-			local reg    = registry[name]
-			local moved  = stored[name] ~= nil
-			local isHot  = (name == hover)
-			local isDrag = drag and drag.name == name and not drag.resize
-			local fill   = isHot and COL_FILL_HOT or (moved and COL_FILL_MOVED or COL_FILL)
-			local line   = moved and COL_OUTLINE_MV or COL_OUTLINE
-			local hidden = reg and reg.isVisible and not reg.isVisible()
-
-			if hidden then
-				fill = { fill[1], fill[2], fill[3], fill[4] * 0.5 }
-				line = { line[1], line[2], line[3], line[4] * 0.5 }
-			end
-
-			if not isDrag then
-				FillRect(r.x1, r.y1, r.x2, r.y2, fill, 3 * uiScale)
-				OutlineRect(r.x1, r.y1, r.x2, r.y2, line, 2, 3 * uiScale)
-				if reg and reg.onResize then
-					local gx1, gy1, gx2, gy2 = GripRect(r)
-					FillRect(gx1, gy1, gx2, gy2, COL_GHOST, 2 * uiScale)
-				end
-			end
-		end
-	end
-
-	if drag and not drag.resize then
-		local r = rects[drag.name]
-		if r then
-			local gx1, gy1 = drag.x1, drag.y1
-			local gx2, gy2 = gx1 + r.w, gy1 + r.h
-			FillRect(gx1, gy1, gx2, gy2, COL_FILL_HOT, 3 * uiScale)
-			OutlineRect(gx1, gy1, gx2, gy2, COL_GHOST, 2, 3 * uiScale)
-		end
-	end
-
-	FlushShapes()
-
-	-- Labels after the flush so text sits on top of the batched shapes.
-	for _, name in ipairs(rectOrder) do
-		local r = rects[name]
-		if r and not (drag and drag.name == name and not drag.resize) then
-			local reg = registry[name]
-			local hidden = reg and reg.isVisible and not reg.isVisible()
-			local label = reg and reg.label or name
-			if r.h >= fontSize * 1.4 and r.w >= fontSize * 4 then
-				DrawLabel(r.x1, r.y1, r.x2, r.y2, label, hidden and COL_TEXT_DIM or COL_TEXT)
-			end
-		end
-	end
-	if drag and not drag.resize then
-		local r = rects[drag.name]
-		if r then
-			local reg = registry[drag.name]
-			DrawLabel(drag.x1, drag.y1, drag.x1 + r.w, drag.y1 + r.h, reg and reg.label or drag.name, COL_TEXT)
-		end
-	end
-
-	-- Hint line along the bottom edge
-	if font then
-		font:Begin()
-		font:SetTextColor(1, 1, 1, 0.8)
-		font:Print("Tweak mode: drag panels to move, drag a white corner to resize, right-click to reset one, /resetlayout to reset all",
-		           vsx * 0.5, math_floor(8 * uiScale), fontSize, "co")
-		font:End()
-	end
-
-	gl.Color(1, 1, 1, 1)
 end

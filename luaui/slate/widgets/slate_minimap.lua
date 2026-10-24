@@ -1,181 +1,124 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--
+--  Minimap placement and frame of the RmlUi HUD. Puts the engine's minimap in
+--  the top left corner, sized to the map's proportions, and draws a frame
+--  around it. The minimap itself stays the engine's.
+--
+--  The size follows the "Minimap size" setting (slate_minimapsize).
+--
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Minimap",
-		desc    = "Frames the engine minimap. Its shape follows the map; move it and resize it in tweak mode (Ctrl+F11), or set its size in the settings.",
+
+		desc    = "Places the default minimap in the top-left corner with a frame around it ",
 		author  = "Scary le Poo",
-		date    = "2026-10-08",
-		license = "GNU GPL, v2 or later",
+		date    = "2026-10-24",
+		license = "GPL v2 or later",
 		layer   = 1000,
 		enabled = true,
 	}
 end
 
---------------------------------------------------------------------------------
--- HOW THIS WORKS (same approach as Splinter Faction's "Minimap Top Left")
---
--- The engine owns the minimap: it draws it, takes its mouse input and decides
--- its final rectangle. A widget can only ask for a geometry, and the engine
--- may override that request during the first frames of a game. So the minimap
--- is not something inside a box this widget built; it is something this
--- widget keeps drawing a box around:
---
---   * it asks for the geometry repeatedly for the first frames, then stops;
---   * the frame is drawn around Spring.GetMiniMapGeometry() - what the engine
---     really did - never around what was asked for.
---
--- Where and how big to ask for is the player's choice. In tweak mode
--- (Ctrl+F11) the frame drags like any other panel and its bottom-right corner
--- resizes it; the settings screen has a size slider as well. The shape always
--- follows the map, so the map is never letterboxed: resizing scales it, and
--- very wide maps are capped in width and lose height instead.
---
--- Other panels that need to sit beside the minimap read WG.Slate.minimap,
--- { x1, y1, x2, y2 } of the frame in screen pixels.
---------------------------------------------------------------------------------
+local DOCUMENT_PATH = "minimap.rml"
 
--- design pixels (1080-high screen), at size 1
-local MAP_HEIGHT    = 288
-local MAX_MAP_WIDTH = 460
-local FRAME         = 6             -- glass band around the map
-local REAPPLY_FRAMES = 30
-local ID = "minimap"
+local MINIMAP_HEIGHT_RATIO = 400 / 1440 -- share of the screen's height; tuned at 1440p
+local PADDING = 8     -- pixels between the screen's edge and the minimap
+local FRAME_DP = 3    -- the frame's thickness (must match the borders in minimap.rml: 2 + 1)
+local SETTLE_FRAMES = 30 -- the engine may move the minimap again while loading; repeat for this long
 
 local spSendCommands       = Spring.SendCommands
 local spGetMiniMapGeometry = Spring.GetMiniMapGeometry
-local floor = math.floor
-local min, max = math.min, math.max
 
-local S
-local oldGeometry
+local hud, S
+local document
+local view
 local frames = 0
-local lastRect = ""
-local lastAsked = ""
-local cache
+local shown = "" -- the geometry the frame was last given
 
---------------------------------------------------------------------------------
-
--- Map size in screen pixels for a size multiplier.
-local function MapSize(size)
-	local aspect = (Game.mapSizeZ or 1) / (Game.mapSizeX or 1)   -- height / width
-	local h = S.px(MAP_HEIGHT) * size
-	local w = h / aspect
-	local maxW = min(S.px(MAX_MAP_WIDTH) * size, S.vsx * 0.6)
-	if w > maxW then
-		w = maxW
-		h = w * aspect
-	end
-	local maxH = S.vsy * 0.7
-	if h > maxH then
-		h = maxH
-		w = h / aspect
-	end
-	return floor(w + 0.5), floor(h + 0.5)
+local function round(x)
+	return math.floor(x + 0.5)
 end
 
-local function Apply()
-	local w, h = MapSize(S.theme.minimapSize or 1)
-	local pad = S.px(FRAME)
-	local fw, fh = w + pad * 2, h + pad * 2
-	-- the frame is the panel: top-left by default, wherever it was dragged
-	-- to otherwise
-	local m = S.theme.margin
-	local fx1, fy1 = S.Box(ID, "l", "t", m, m, fw / S.scale, fh / S.scale)
-	local x = fx1 + pad
-	local top = S.vsy - (fy1 + fh) + pad      -- the engine measures from the top
-	local asked = x .. " " .. top .. " " .. w .. " " .. h
-	if asked ~= lastAsked or frames < REAPPLY_FRAMES then
-		lastAsked = asked
-		spSendCommands("minimap geo " .. asked)
-		spSendCommands("minimap border 0")
+local function SetMinimap()
+	local vsx, vsy = Spring.GetViewGeometry()
+	local aspect = Game.mapSizeZ / Game.mapSizeX
+	local size = (S and S.Get("minimapSize")) or 1
+	local h = round(vsy * MINIMAP_HEIGHT_RATIO * size)
+	local w = round(h / aspect)
+	-- a wide map gets a wide minimap, but never wider than a third of the screen
+	if w > vsx / 3 then
+		w = round(vsx / 3)
+		h = round(w * aspect)
 	end
+	spSendCommands("minimap geo " .. PADDING .. " " .. PADDING .. " " .. w .. " " .. h)
+	spSendCommands("minimap border 0")
 end
 
--- Tweak mode is dragging the corner grip to this frame size.
-local function Resize(_, frameH)
-	local _, baseH = MapSize(1)
-	local size = (frameH - S.px(FRAME) * 2) / max(1, baseH)
-	size = floor(min(2.5, max(0.5, size)) * 50 + 0.5) / 50
-	if size ~= (S.theme.minimapSize or 1) then S.Set("minimapSize", size) end
-end
-
--- Publish the frame rectangle and tell the other panels when it changes.
-local function Publish(x, y, w, h)
-	local pad = S.px(FRAME)
-	local rect = { x1 = x - pad, y1 = y - pad, x2 = x + w + pad, y2 = y + h + pad }
-	local key = rect.x1 .. ":" .. rect.y1 .. ":" .. rect.x2 .. ":" .. rect.y2
-	S.minimap = rect
-	if key ~= lastRect then
-		lastRect = key
-		if S.Notify then S.Notify() end
+-- wraps the frame around wherever the minimap is now
+local function PlaceFrame()
+	if not document then
+		return
 	end
-	return rect
+	local x, y, w, h = spGetMiniMapGeometry() -- y from the bottom of the screen
+	if not x or not w or w <= 0 or h <= 0 then
+		return
+	end
+	local _, vsy = Spring.GetViewGeometry()
+	local pad = math.max(1, round(FRAME_DP * hud.GetScale()))
+	local key = x .. " " .. y .. " " .. w .. " " .. h .. " " .. vsy .. " " .. pad
+	if key ~= shown then
+		shown = key
+		local element = view.Element("minimap-frame")
+		element.style["left"] = (x - pad) .. "px"
+		element.style["top"] = (vsy - (y + h) - pad) .. "px"
+		element.style["width"] = (w + 2 * pad) .. "px"
+		element.style["height"] = (h + 2 * pad) .. "px"
+	end
 end
 
 function widget:Initialize()
-	S = WG.Slate
-	if not S then
-		widgetHandler:RemoveWidget()
-		return
+	SetMinimap()
+	local helpers = include("slate/rml/core.lua")
+	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		Spring.Echo("[Slate Minimap] " .. tostring(reason))
+		return -- the minimap is still placed, only without a frame
 	end
-	oldGeometry = Spring.GetConfigString("MiniMapGeometry", "2 2 200 200")
-	spSendCommands("minimap minimize 0")
-	S.Register(ID, "Minimap", Apply, Resize)
-	S.OnChange(ID, Apply)
-	Apply()
+	hud = helpers
+	hud.showInPregame = true -- the minimap is used to pick a start spot
+	document = result
+	view = hud.NewView(document)
+	hud.OnChange("slate_minimap", OnSettings)
+	PlaceFrame()
+	hud.ShowPassive(document)
 end
 
 function widget:Shutdown()
-	if oldGeometry and oldGeometry ~= "" then
-		spSendCommands("minimap geo " .. oldGeometry)
-	end
-	spSendCommands("minimap border 1")
-	if S then
-		S.Unregister(ID)
-		S.OffChange(ID)
-		S.Unblur(ID)
-		S.minimap = nil
-		if S.Notify then S.Notify() end
+	if hud then
+		hud.OffChange("slate_minimap")
+		hud.CloseDocument(document)
+		document = nil
 	end
 end
 
 function widget:ViewResize()
-	if S and WG.Slate == S then
-		frames = 0
-		Apply()
+	SetMinimap()
+	frames = 0
+	if hud and document then
+		hud.UpdateScale()
 	end
 end
 
--- The engine can replace the geometry while a game is starting, so keep asking
--- for a short while and then leave it alone.
 function widget:Update()
-	if WG.Slate ~= S then return end
-	if frames < REAPPLY_FRAMES then
+	if frames < SETTLE_FRAMES then
 		frames = frames + 1
-		Apply()
+		SetMinimap()
 	end
-end
-
-function widget:DrawScreen()
-	if WG.Slate ~= S then return end
-	local x, y, w, h, minimized = spGetMiniMapGeometry()
-	if not (x and y and w and h) or minimized then return end
-
-	local r = Publish(x, y, w, h)
-	cache = S.Cached(cache, S.version .. ":" .. lastRect, function()
-		local t = S.theme
-		local p = t.panel
-		local glass = { p[1], p[2], p[3], t.opacity }
-		-- The engine has already drawn the map, so the glass goes around it
-		-- as four bands, never over it.
-		S.Rect(r.x1, y + h, r.x2, r.y2, glass, 0)     -- top
-		S.Rect(r.x1, r.y1, r.x2, y, glass, 0)         -- bottom
-		S.Rect(r.x1, y, x, y + h, glass, 0)           -- left
-		S.Rect(x + w, y, r.x2, y + h, glass, 0)       -- right
-		S.Outline(r.x1, r.y1, r.x2, r.y2, t.border, S.px(3), 1)
-		S.Outline(x - 1, y - 1, x + w + 1, y + h + 1, t.buttonBorder, 0, 1)
-	end)
-	S.Flush()
+	if document and not hud.FollowGuiHidden(document) then
+		PlaceFrame() -- four numbers compared; the frame is touched only when they change
+	end
 end

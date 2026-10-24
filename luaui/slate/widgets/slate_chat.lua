@@ -1,238 +1,558 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Chat",
-		desc    = "Shows chat on screen with team-coloured names and a colour per channel, and keeps the full history for the Slate Chat Log. Engine console output stays out of the way. Replaces the engine console.",
+		desc    = "Chat lines with team-colored player names and a color per channel; feeds the Log window",
 		author  = "Scary le Poo",
-		date    = "2026-10-09",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
-		layer   = 4,
+		layer   = 0,
 		enabled = true,
 	}
 end
 
 --------------------------------------------------------------------------------
--- HOW THIS WORKS (the same model as ChatterboxChat in Splinter Faction)
+--  The newest chat lines, low in the middle of the screen, with team-colored
+--  player names and a color per channel. Lines fade out after a while. The
+--  engine's own console is switched off.
 --
--- Every console line is parsed into an entry with a channel:
---
---   public, ally, spectator, whisper   what players typed
---   marker                             "<player> added point: ..."
---   event                              speed changes, pause and unpause
---   system                             everything else the engine prints
---
--- All entries go into one history (WG.SlateChat.GetLog), which the Slate Chat
--- Log window shows with Chat / Console / All tabs. Only chat - everything that
--- is not "system" - appears in the on-screen overlay, where it fades out.
+--  This widget is also where chat is read: every console line is parsed here
+--  and kept (WG.SlateChat) for the Log window, which shows the whole history.
+--  Speed changes and pauses are shown as chat lines too; a burst of speed
+--  steps is collapsed into one line.
 --------------------------------------------------------------------------------
 
-local ID = "chat"
-local WIDTH, HEIGHT = 760, 190      -- design pixels; as wide as the selection panel
-local SELECTION_H   = 128           -- height of the selection panel it sits above
-local INPUT_H       = 34            -- room for the engine's chat entry line
-local LINE_H        = 22
-local TEXT_SIZE     = 16
-local MAX_LINES     = 8             -- wrapped lines on screen at once
-local LINE_LIFETIME = 10            -- seconds before a line starts to fade
-local FADE_TIME     = 6
-local MAX_LOG       = 1000
-local LOG_SLACK     = 64
-local SPEED_DEBOUNCE = 0.6          -- collapse a burst of speed changes into one line
-
-local floor = math.floor
-local min, max = math.min, math.max
-
--- Seconds of real time since the widget loaded (os.clock counts CPU time,
--- which runs slow when the game is idle).
-local startTimer = Spring.GetTimer()
-local function Clock() return Spring.DiffTimers(Spring.GetTimer(), startTimer) end
-
-local S
-local x1, y1, x2, y2
-local overlay = {}                  -- entries currently on screen, oldest first
-local fullLog = {}                  -- every entry, capped at MAX_LOG
-local players = {}                  -- lowercase name -> { name, color }
-local playerTimer = 10
-local pendingSpeed, pendingSpeedTime
-
 --------------------------------------------------------------------------------
--- Players and colours
+-- config
 --------------------------------------------------------------------------------
 
-local function Trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+local DOCUMENT_PATH = "chat.rml"
 
-local function RefreshPlayers()
-	players = {}
-	local list = Spring.GetPlayerList() or {}
-	for i = 1, #list do
-		local name, _, spectator, teamID = Spring.GetPlayerInfo(list[i], false)
+-- must match #chat in chat.rml
+local BOX_WIDTH  = 650
+local BOX_HEIGHT = 200
+-- The selection panel stands centred at the bottom of the screen (see
+-- slate_selection.lua, HEIGHT); the box sits a gap above it.
+local SELECTION_HEIGHT = 128
+
+local LAYOUT_NAME = "slate_chat"
+
+local MAX_LINES            = 6       -- messages shown at once
+local LINE_LIFETIME        = 10      -- seconds before fade starts
+local FADE_TIME            = 6       -- seconds of fadeout
+local FADE_STEPS           = 20      -- the fade moves in this many steps, not every frame
+local HIDE_DEFAULT_CONSOLE = true    -- hide the engine's console/chat
+
+-- Persistent scrollback shared with the Log window (slate_log.lua).
+-- Every parsed line is appended here regardless of channel; the floating overlay
+-- still only shows actual chat. MAX_LOG caps retained history.
+local MAX_LOG  = 1000
+local LOG_SLACK = 64   -- compact in chunks so trimming is amortized, not per-line
+
+-- Game events (speed changes, pause/unpause) surfaced in chat as channel "event".
+local SHOW_SPEED_CHANGES = true
+local SHOW_PAUSE_EVENTS  = true
+
+-- Rapid speed steps (e.g. dragging the speed slider) arrive as dozens of
+-- "Speed set to X" lines in under a second. Collapse a burst into a single
+-- message showing the final value once no new speed line has arrived for this
+-- many real-time seconds.
+local SPEED_DEBOUNCE     = 0.6
+
+--------------------------------------------------------------------------------
+-- speedups and state
+--------------------------------------------------------------------------------
+
+local spGetPlayerList   = Spring.GetPlayerList
+local spGetPlayerInfo   = Spring.GetPlayerInfo
+local spGetTeamColor    = Spring.GetTeamColor
+local spSendCommands    = Spring.SendCommands
+local spGetGameSeconds  = Spring.GetGameSeconds
+
+local hud, S
+local document
+local view
+
+local chatLines = {}   -- the lines on screen, oldest first
+local fullLog   = {}   -- persistent scrollback (all channels); read by the Log panel
+local serial    = 0    -- numbers the lines, for their element ids
+local shownSignature = ""
+
+-- The engine's sync messages (rml/syncmessages.lua). It repeats them every few
+-- seconds while they last: the first one about a set of players goes to chat,
+-- the repeats only to the log.
+local sync
+local syncSeen = {}         -- kind .. names -> the game second it was last shown in chat
+local NORESPONSE_REPEAT = 60 -- a "not reporting" warning may come back to chat after this many seconds
+
+local pendingSpeed  = nil   -- coalesced speed-change entry awaiting flush
+local pendingSpeedT = 0     -- os.clock() of the last speed line seen
+
+local myPlayerNames = {}      -- lowercase name -> true for local user(s)
+local cachedPlayerData = {}   -- lowercase name -> {name=..., teamID=..., isSpec=..., color={r,g,b,1}}
+
+--------------------------------------------------------------------------------
+-- colors. The floating lines are colored by their channel's class in chat.rml;
+-- these are what the Log window uses for the same lines. They are the Slate
+-- palette (theme.rcss): text, good, bad, warn, muted and accent.
+--------------------------------------------------------------------------------
+
+local COLOR_PUBLIC  = {0.93, 0.93, 0.94, 1.00}   -- #eceef0
+local COLOR_ALLY    = {0.61, 0.91, 0.66, 1.00}   -- #9be7a8
+local COLOR_WHISPER = {1.00, 0.70, 0.65, 1.00}   -- #ffb3a6
+local COLOR_SPEC    = {0.95, 0.76, 0.19, 1.00}   -- #f2c230
+local COLOR_SYSTEM  = {0.71, 0.73, 0.76, 1.00}   -- #b5bac1
+local COLOR_EVENT   = {0.66, 0.74, 0.82, 1.00}   -- #a9bdd0, speed / pause game events
+local COLOR_DESYNC  = {1.00, 0.35, 0.31, 1.00}   -- a player's game out of sync
+local COLOR_WARNING = {1.00, 0.61, 0.13, 1.00}   -- a player not reporting its game state
+
+--------------------------------------------------------------------------------
+-- helpers (carried over)
+--------------------------------------------------------------------------------
+
+local function Lower(s)
+	return s and string.lower(s) or s
+end
+
+local function Trim(s)
+	return (s and s:match("^%s*(.-)%s*$")) or ""
+end
+
+local function RefreshPlayerCache()
+	cachedPlayerData = {}
+	myPlayerNames = {}
+
+	local players = spGetPlayerList()
+	for i = 1, #players do
+		local playerID = players[i]
+		local name, active, isSpec, teamID = spGetPlayerInfo(playerID, false)
 		if name then
-			local color
-			if not spectator and teamID then
-				local r, g, b = Spring.GetTeamColor(teamID)
-				if r then
-					-- lift very dark team colours so the name stays readable
-					local lum = 0.3 * r + 0.59 * g + 0.11 * b
-					if lum < 0.35 then
-						local k = 0.35 - lum
-						r, g, b = min(1, r + k), min(1, g + k), min(1, b + k)
-					end
-					color = { r, g, b, 1 }
-				end
+			local r, g, b = 1, 1, 1
+			if teamID then
+				r, g, b = spGetTeamColor(teamID)
 			end
-			players[name:lower()] = { name = name, color = color }
+			local key = Lower(name)
+			cachedPlayerData[key] = {
+				name   = name,
+				active = active,
+				isSpec = isSpec,
+				teamID = teamID,
+				color  = {r, g, b, 1},
+			}
+		end
+	end
+
+	local myPlayerID = Spring.GetMyPlayerID()
+	if myPlayerID then
+		local myName = spGetPlayerInfo(myPlayerID, false)
+		if myName then
+			myPlayerNames[Lower(myName)] = true
 		end
 	end
 end
 
-local function NameColor(name)
-	local p = players[Trim(name):lower()]
-	return (p and p.color) or S.theme.chat.spectatorName
+local function GetPlayerColorByName(name)
+	local entry = cachedPlayerData[Lower(name or "")]
+	if entry and entry.color then
+		return entry.color
+	end
+	return {1, 1, 1, 1}
 end
 
-local function Code(c)
-	local function b(v) return string.char(max(1, min(255, floor(v * 255 + 0.5)))) end
-	return "\255" .. b(c[1]) .. b(c[2]) .. b(c[3])
+local function PushChatLine(data)
+	serial = serial + 1
+	data.time = os.clock()
+	data.id   = serial
+	chatLines[#chatLines + 1] = data
 end
 
---------------------------------------------------------------------------------
--- Parsing
---------------------------------------------------------------------------------
-
-local function Parse(line)
-	if not line or line == "" then return nil end
-	local text = Trim(line)
-	local c = S.theme.chat
-	local player, body
-
-	player, body = text:match("^<([^>]+)>%s*Spectators:%s*(.*)$")
-	if player then return { channel = "spectator", player = player, body = body, color = c.spectator } end
-
-	player, body = text:match("^<([^>]+)>%s*Allies:%s*(.*)$")
-	if player then return { channel = "ally", player = player, body = body, color = c.ally } end
-
-	player, body = text:match("^<([^>]+)>%s*Whispers:%s*(.*)$")
-	if not player then player, body = text:match("^Whisper from ([^:]+):%s*(.*)$") end
-	if not player then player, body = text:match("^To ([^:]+):%s*(.*)$") end
-	if player then return { channel = "whisper", player = Trim(player), body = body, color = c.whisper } end
-
-	-- Public chat is "<Name> message". Widgets and gadgets print lines of the
-	-- same shape ("<DefenseRange> ..."), so the name has to be a player's.
-	player, body = text:match("^<([^>]+)>%s*(.*)$")
-	if player and not players[Trim(player):lower()] then RefreshPlayers() end
-	if player and players[Trim(player):lower()] then
-		return { channel = "public", player = player, body = body, color = c.public }
-	end
-
-	player, body = text:match("^(.+) added point:%s*(.*)$")
-	if player then
-		return { channel = "marker", player = player, color = c.ally,
-			body = (body ~= "") and ("added point: " .. body) or "added a point", joined = true }
-	end
-
-	-- "Speed set to N [player]" - the trailing [player] is optional
-	local n, who = text:match("^Speed set to%s+([%d%.]+)%s+%[([^%]]+)%]%s*$")
-	if not n then n = text:match("^Speed set to%s+([%d%.]+)%s*$") end
-	if n then
-		if who and who ~= "" then
-			return { channel = "event", kind = "speed", player = Trim(who), body = "set speed to " .. n .. "x", color = c.event, joined = true }
-		end
-		return { channel = "event", kind = "speed", body = "Speed set to " .. n .. "x", color = c.event }
-	end
-
-	-- check "unpaused" first so it is never read as "paused"
-	who = text:match("^(.-)%s+unpaused the game%s*$")
-	if who and who ~= "" then
-		return { channel = "event", kind = "pause", player = Trim(who), body = "unpaused the game", color = c.event, joined = true }
-	end
-	who = text:match("^(.-)%s+paused the game%s*$")
-	if who and who ~= "" then
-		return { channel = "event", kind = "pause", player = Trim(who), body = "paused the game", color = c.event, joined = true }
-	end
-
-	-- Spectator chat arrives as "[Name] message". The engine also prints
-	-- bracketed tags that are not chat ("[GiveUnits] ..."), so only accept the
-	-- form when the name is a known player.
-	player, body = text:match("^%[([^%]]+)%]%s*(.*)$")
-	if player and players[Trim(player):lower()] then
-		return { channel = "spectator", player = Trim(player), body = body, color = c.spectator }
-	end
-
-	return { channel = "system", body = line, color = c.system }
-end
-
+-- A line counts as "chat" (shown in the floating overlay and the Log panel's
+-- Chat tab) when it is anything other than raw console output. Only the
+-- fallback "system" channel is non-chat; map markers use their own "marker"
+-- channel so they remain chat while still being distinguishable from console.
 local function IsChat(entry)
 	return entry ~= nil and entry.channel ~= "system"
 end
 
---------------------------------------------------------------------------------
--- Wrapping and storage
---------------------------------------------------------------------------------
-
--- Lines for the overlay: the name (in its own colour) leads the first line and
--- the body wraps underneath, indented. Each line is a list of segments
--- { text, color, x } so every segment can be faded; the engine's inline colour
--- codes cannot be used here because they reset transparency to solid.
-local function Wrap(entry, width)
-	local lines = {}
-	local segs, offset = {}, 0
-	if entry.player then
-		local lead = entry.player .. (entry.joined and " " or ":  ")
-		segs[1] = { text = lead, color = NameColor(entry.player), x = 0 }
-		offset = S.TextWidth(lead, TEXT_SIZE)
-	end
-	local indent = S.TextWidth("    ", TEXT_SIZE)
-	local line, words = "", 0
-	for word in (entry.body or ""):gmatch("%S+") do
-		local try = (words > 0) and (line .. " " .. word) or word
-		if words > 0 and offset + S.TextWidth(try, TEXT_SIZE) > width then
-			segs[#segs + 1] = { text = line, color = entry.color, x = offset }
-			lines[#lines + 1] = segs
-			segs, offset = {}, indent
-			line, words = word, 1
-		else
-			line, words = try, words + 1
-		end
-	end
-	if words > 0 then segs[#segs + 1] = { text = line, color = entry.color, x = offset } end
-	if #segs > 0 then lines[#lines + 1] = segs end
-	return lines
-end
-
-local function Emit(entry)
-	entry.gameTime = floor(Spring.GetGameSeconds() or 0)
+local function AppendFullLog(entry)
 	fullLog[#fullLog + 1] = entry
 	local n = #fullLog
 	if n >= MAX_LOG + LOG_SLACK then
 		local drop = n - MAX_LOG
-		for i = 1, n - drop do fullLog[i] = fullLog[i + drop] end
-		for i = n - drop + 1, n do fullLog[i] = nil end
+		for i = 1, n - drop do
+			fullLog[i] = fullLog[i + drop]
+		end
+		for i = n - drop + 1, n do
+			fullLog[i] = nil
+		end
 	end
+end
+
+-- Stamp, log, and (for chat) push to the floating overlay + play its sound.
+-- Single choke point so both the console callin and the deferred speed flush
+-- behave identically.
+local function EmitEntry(entry)
+	entry.gtime = spGetGameSeconds and math.floor(spGetGameSeconds()) or 0
+	AppendFullLog(entry)
 
 	if not IsChat(entry) then return end
-	entry.born = Clock()
-	entry.lines = Wrap(entry, (x2 or 600) - (x1 or 0))
-	overlay[#overlay + 1] = entry
 
-	local sounds = S.game.chatSounds
-	local sound = sounds and entry.player and sounds[entry.channel]
-	if sound then Spring.PlaySoundFile(sound, 1.0, "ui") end
+	PushChatLine(entry)
+
+	-- the sound files are named per channel in slate_game.lua (sounds = {...})
+	if entry.player then
+		if entry.channel == "whisper" then
+			hud.Sound("whisper")
+		elseif entry.channel == "ally" then
+			hud.Sound("allychat")
+		elseif entry.channel == "spectator" then
+			hud.Sound("specchat")
+		elseif entry.channel == "public" then
+			hud.Sound("chat")
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
+-- chat parsing (carried over)
+--------------------------------------------------------------------------------
 
-local function Layout()
-	-- bottom centre, directly above the selection panel, with the engine's
-	-- chat entry line in the gap between the two
-	local t = S.theme
-	x1, y1, x2, y2 = S.Box(ID, "c", "b", 0, t.margin + SELECTION_H + t.gap + INPUT_H, WIDTH, HEIGHT)
-	Spring.SendCommands(string.format("inputtextgeo %.3f %.3f 0.02 0.028",
-		x1 / S.vsx, max(0.02, (y1 - S.px(INPUT_H - 6)) / S.vsy)))
-	for i = 1, #overlay do
-		overlay[i].lines = Wrap(overlay[i], x2 - x1)
+local function ParseChatLine(line)
+	if not line or line == "" then
+		return nil
 	end
+
+	local raw = line
+	local text = Trim(line)
+
+	-- <Player> Spectators: message
+	do
+		local player, body = text:match("^<([^>]+)>%s*Spectators:%s*(.*)$")
+		if player then
+			return {
+				channel   = "spectator",
+				player    = player,
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_SPEC,
+				body      = body,
+				raw       = raw,
+			}
+		end
+	end
+
+	-- <Player> Allies: message
+	do
+		local player, body = text:match("^<([^>]+)>%s*Allies:%s*(.*)$")
+		if player then
+			return {
+				channel   = "ally",
+				player    = player,
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_ALLY,
+				body      = body,
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Whisper examples
+	do
+		local player, body
+
+		-- <Player> Whispers: message
+		player, body = text:match("^<([^>]+)>%s*Whispers:%s*(.*)$")
+		if player then
+			return {
+				channel   = "whisper",
+				player    = player,
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_WHISPER,
+				body      = body,
+				raw       = raw,
+			}
+		end
+
+		-- Whisper from Player: message
+		player, body = text:match("^Whisper from ([^:]+):%s*(.*)$")
+		if player then
+			return {
+				channel   = "whisper",
+				player    = Trim(player),
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_WHISPER,
+				body      = body,
+				raw       = raw,
+			}
+		end
+
+		-- To Player: message
+		player, body = text:match("^To ([^:]+):%s*(.*)$")
+		if player then
+			return {
+				channel   = "whisper",
+				player    = Trim(player),
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_WHISPER,
+				body      = body,
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Normal public chat: <Player> message
+	do
+		local player, body = text:match("^<([^>]+)>%s*(.*)$")
+		if player then
+			return {
+				channel   = "public",
+				player    = player,
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_PUBLIC,
+				body      = body,
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Sync messages from the game server. They never start with "<name>", so
+	-- a chat line cannot pass for one.
+	do
+		local report = sync and sync.Parse(text)
+		if report then
+			local names = table.concat(report.names, ", ")
+			local key = report.kind .. ":" .. names
+			local now = spGetGameSeconds and spGetGameSeconds() or 0
+			local seen = syncSeen[key]
+			local fresh = not seen or (report.kind == "noresponse" and now - seen >= NORESPONSE_REPEAT)
+			if not fresh then
+				return {
+					channel   = "system",
+					bodyColor = (report.kind == "desync") and COLOR_DESYNC or COLOR_WARNING,
+					body      = raw,
+					raw       = raw,
+				}
+			end
+			syncSeen[key] = now
+			local single = (#report.names == 1) and report.names[1] or nil
+			if report.kind == "desync" then
+				return {
+					channel   = "desync",
+					player    = sync.JoinNames(report.names),
+					nameColor = single and GetPlayerColorByName(single) or COLOR_DESYNC,
+					bodyColor = COLOR_DESYNC,
+					separator = "",
+					body      = string.format("%s out of sync since %s (frame %d)",
+						(#report.names == 1) and "is" or "are", sync.FrameTime(report.frame), report.frame),
+					raw       = raw,
+				}
+			end
+			return {
+				channel   = "warning",
+				player    = sync.JoinNames(report.names),
+				nameColor = single and GetPlayerColorByName(single) or COLOR_WARNING,
+				bodyColor = COLOR_WARNING,
+				separator = "",
+				body      = string.format("did not report their game state in time (frame %d)",
+					report.frame),
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Map marker: "playername added point:" / "playername added point: label text"
+	do
+		local player, label = text:match("^(.+) added point:%s*(.*)$")
+		if player then
+			local body = label ~= "" and "added point: " .. label or "added point:"
+			return {
+				channel   = "marker",
+				player    = player,
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_ALLY,
+				body      = body,
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Speed change: "Speed set to N [player]" (the trailing [player] is optional).
+	-- The bracket is at the END here, so it never collides with the leading-[name]
+	-- spectator form below.
+	do
+		local n, player = text:match("^Speed set to%s+([%d%.]+)%s+%[([^%]]+)%]%s*$")
+		if not n then
+			n = text:match("^Speed set to%s+([%d%.]+)%s*$")
+		end
+		if n then
+			if player and player ~= "" then
+				return {
+					channel   = "event",
+					eventKind = "speed",
+					player    = Trim(player),
+					nameColor = GetPlayerColorByName(player),
+					bodyColor = COLOR_EVENT,
+					separator = "",
+					body      = "set speed to " .. n .. "x",
+					raw       = raw,
+				}
+			end
+			return {
+				channel   = "event",
+				eventKind = "speed",
+				player    = nil,
+				nameColor = nil,
+				bodyColor = COLOR_EVENT,
+				body      = "Speed set to " .. n .. "x",
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Pause / unpause: "<player> paused the game" / "<player> unpaused the game".
+	-- Check unpaused first so it is never mistaken for a paused match.
+	do
+		local player = text:match("^(.-)%s+unpaused the game%s*$")
+		if player and player ~= "" then
+			return {
+				channel   = "event",
+				eventKind = "pause",
+				player    = Trim(player),
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_EVENT,
+				separator = "",
+				body      = "unpaused the game",
+				raw       = raw,
+			}
+		end
+		player = text:match("^(.-)%s+paused the game%s*$")
+		if player and player ~= "" then
+			return {
+				channel   = "event",
+				eventKind = "pause",
+				player    = Trim(player),
+				nameColor = GetPlayerColorByName(player),
+				bodyColor = COLOR_EVENT,
+				separator = "",
+				body      = "paused the game",
+				raw       = raw,
+			}
+		end
+	end
+
+	-- Spectator chat: this engine renders it as "[PlayerName] message".
+	-- The engine also emits bracketed status tags (e.g. "[com_ends] ...") that
+	-- are NOT chat, so only accept the bracket form when the name matches a
+	-- known player/spectator in the cache. Unknown tags fall through to system.
+	do
+		local player, body = text:match("^%[([^%]]+)%]%s*(.*)$")
+		if player then
+			local key = Lower(Trim(player))
+			if cachedPlayerData[key] then
+				return {
+					channel   = "spectator",
+					player    = Trim(player),
+					nameColor = GetPlayerColorByName(player),
+					bodyColor = COLOR_SPEC,
+					body      = body,
+					raw       = raw,
+				}
+			end
+		end
+	end
+
+	-- Fallback/system line
+	return {
+		channel   = "system",
+		player    = nil,
+		nameColor = nil,
+		bodyColor = COLOR_SYSTEM,
+		body      = raw,
+		raw       = raw,
+	}
+end
+
+--------------------------------------------------------------------------------
+-- showing
+--------------------------------------------------------------------------------
+
+-- 1 while a line is fresh, then down to 0 in FADE_STEPS steps
+local function LineAlpha(entry, now)
+	local age = now - entry.time
+	if age <= LINE_LIFETIME then
+		return 1
+	end
+	if age >= (LINE_LIFETIME + FADE_TIME) then
+		return 0
+	end
+	return math.ceil((1 - ((age - LINE_LIFETIME) / FADE_TIME)) * FADE_STEPS) / FADE_STEPS
+end
+
+local function LineRML(entry)
+	local body = hud.Escape(entry.body or "")
+	if entry.player then
+		local c = entry.nameColor or COLOR_PUBLIC
+		return string.format('<div id="c%d" class="line %s"><span class="name" style="color: %s;">%s%s</span> %s</div>',
+			entry.id, entry.channel, hud.ReadableColor(c[1], c[2], c[3]), hud.Escape(entry.player), hud.Escape(entry.separator or ":"), body)
+	end
+	return string.format('<div id="c%d" class="line %s">%s</div>', entry.id, entry.channel, body)
+end
+
+local function Refresh()
+	local now = os.clock()
+	-- drop what has faded out, keep the newest MAX_LINES
+	local alive = {}
+	for i = 1, #chatLines do
+		if LineAlpha(chatLines[i], now) > 0 then
+			alive[#alive + 1] = chatLines[i]
+		end
+	end
+	while #alive > MAX_LINES do
+		table.remove(alive, 1)
+	end
+	chatLines = alive
+
+	-- the markup changes only when a line comes or goes
+	local ids = {}
+	for i = 1, #alive do
+		ids[i] = alive[i].id
+	end
+	local signature = table.concat(ids, ",")
+	if signature ~= shownSignature then
+		shownSignature = signature
+		local parts = {}
+		for i = 1, #alive do
+			parts[i] = LineRML(alive[i])
+		end
+		view.Element("chat").inner_rml = table.concat(parts)
+		view.Forget()
+	end
+	for i = 1, #alive do
+		view.SetStyle("c" .. alive[i].id, "opacity", string.format("%.2f", LineAlpha(alive[i], now)))
+	end
+end
+
+--------------------------------------------------------------------------------
+-- widget api
+--------------------------------------------------------------------------------
+
+-- Centered, just above the selection panel.
+local function DefaultOrigin(vsx, vsy, w, h, scale)
+	return (vsx - w) * 0.5, (hud.Margin() + SELECTION_HEIGHT + hud.Gap()) * scale
+end
+
+local function Place()
+	hud.PlacePanel(view.Element("chat"), LAYOUT_NAME, BOX_WIDTH, BOX_HEIGHT, DefaultOrigin)
+end
+
+function widget:PlayerChanged(playerID)
+	RefreshPlayerCache()
+end
+
+function widget:TeamDied(teamID)
+	RefreshPlayerCache()
 end
 
 function widget:Initialize()
@@ -241,105 +561,103 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 		return
 	end
-	Spring.SendCommands("console 0")
-	RefreshPlayers()
-	S.Register(ID, "Chat", Layout)
-	S.OnChange(ID, Layout)
-	Layout()
+	hud = include("slate/rml/core.lua")
+	RefreshPlayerCache()
+	sync = include("slate/rml/syncmessages.lua")
+
+	if HIDE_DEFAULT_CONSOLE then
+		spSendCommands("console 0")
+	end
+
+	-- Shared interface for the Log window (slate_log.lua). It is offered even
+	-- if the document below fails to load: the log does not need the overlay.
 	WG.SlateChat = {
 		GetLog = function() return fullLog end,
 		IsChat = IsChat,
-		NameColor = NameColor,
 	}
+
+	local result, reason = hud.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		Spring.Echo("[Slate Chat] " .. tostring(reason))
+		return
+	end
+	document = result
+	view = hud.NewView(document)
+
+	hud.RegisterPanel(LAYOUT_NAME, "Chat", Place)
+	hud.OnChange(LAYOUT_NAME, Place)
+	Place()
+	hud.ShowPassive(document)
 end
 
 function widget:Shutdown()
-	Spring.SendCommands("console 1")
 	WG.SlateChat = nil
-	if S then
-		S.Unregister(ID)
-		S.OffChange(ID)
+	if HIDE_DEFAULT_CONSOLE then
+		spSendCommands("console 1")
+	end
+	if hud then
+		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
+		document = nil
 	end
 end
 
 function widget:ViewResize()
-	if S and WG.Slate == S then Layout() end
+	if hud and document then
+		hud.UpdateScale()
+		Place()
+	end
 end
 
-function widget:PlayerChanged()
-	if S and WG.Slate == S then RefreshPlayers() end
-end
+function widget:AddConsoleLine(line, priority)
+	local parsed = ParseChatLine(line)
+	if not parsed then return end
 
-function widget:AddConsoleLine(text)
-	if WG.Slate ~= S or not text or text == "" then return end
-	for part in (text .. "\n"):gmatch("(.-)\r?\n") do
-		local entry = Parse(part)
-		if entry then
-			if entry.kind == "speed" then
-				-- dragging the speed slider prints dozens of these; keep the last
-				pendingSpeed, pendingSpeedTime = entry, Clock()
-			else
-				Emit(entry)
+	if parsed.channel == "event" then
+		if parsed.eventKind == "speed" then
+			if not SHOW_SPEED_CHANGES then
+				-- Keep it in the log as plain console output, off the overlay.
+				parsed.channel = "system"
+				parsed.body    = parsed.raw
+				EmitEntry(parsed)
+				return
 			end
+			-- Coalesce a burst of rapid speed steps into one final message.
+			pendingSpeed  = parsed
+			pendingSpeedT = os.clock()
+			return
+		elseif parsed.eventKind == "pause" and not SHOW_PAUSE_EVENTS then
+			parsed.channel = "system"
+			parsed.body    = parsed.raw
+			EmitEntry(parsed)
+			return
 		end
 	end
+
+	EmitEntry(parsed)
 end
 
 function widget:Update(dt)
-	if WG.Slate ~= S then return end
-	if pendingSpeed and (Clock() - pendingSpeedTime) >= SPEED_DEBOUNCE then
+	if pendingSpeed and (os.clock() - pendingSpeedT) >= SPEED_DEBOUNCE then
 		local entry = pendingSpeed
 		pendingSpeed = nil
-		Emit(entry)
+		EmitEntry(entry)
 	end
-	playerTimer = playerTimer + dt
-	if playerTimer > 5 then
-		playerTimer = 0
-		RefreshPlayers()
+	if not document then
+		return
 	end
-	-- drop entries that have fully faded
-	local now = Clock()
-	while overlay[1] and (now - overlay[1].born) > (LINE_LIFETIME + FADE_TIME) do
-		table.remove(overlay, 1)
-	end
-end
-
-function widget:DrawScreen()
-	if WG.Slate ~= S or not x1 or #overlay == 0 then return end
-	if Spring.IsGUIHidden() then return end
-	local now = Clock()
-	local lh = S.px(LINE_H)
-
-	-- newest entries win when there are more lines than fit
-	local total, firstEntry = 0, #overlay
-	for i = #overlay, 1, -1 do
-		local n = #overlay[i].lines
-		if total + n > MAX_LINES then break end
-		total = total + n
-		firstEntry = i
-	end
-
-	-- the newest line rests on the bottom edge and older ones stack above it
-	local shown = 0
-	for i = firstEntry, #overlay do
-		local age = now - overlay[i].born
-		if age < LINE_LIFETIME + FADE_TIME then shown = shown + #overlay[i].lines end
-	end
-	local y = y1 + (shown - 1) * lh + S.px(4)
-	for i = firstEntry, #overlay do
-		local e = overlay[i]
-		local age = now - e.born
-		local alpha = (age <= LINE_LIFETIME) and 1 or max(0, 1 - (age - LINE_LIFETIME) / FADE_TIME)
-		if alpha > 0 then
-			for j = 1, #e.lines do
-				local segs = e.lines[j]
-				for k = 1, #segs do
-					local c = segs[k].color
-					S.Text(segs[k].text, x1 + segs[k].x, y, TEXT_SIZE, { c[1], c[2], c[3], alpha }, "o")
-				end
-				y = y - lh
-			end
+	-- chat stays on screen during the pregame flow: it matters in multiplayer
+	if Spring.IsGUIHidden() then
+		if shownSignature ~= "hidden" then
+			shownSignature = "hidden"
+			view.Element("chat").inner_rml = ""
 		end
+		return
 	end
-	S.Flush()
+	-- idle cost stops here: nothing on screen and nothing to put there
+	if #chatLines == 0 and shownSignature == "" then
+		return
+	end
+	Refresh()
 end

@@ -1,35 +1,31 @@
 --------------------------------------------------------------------------------
 -- Slate theme
 --
--- Every colour, opacity and size the Slate panels use lives here. A game that
--- adopts Slate restyles it by editing this one file; no panel widget hardcodes
--- a colour.
+-- The look itself lives in luaui/slate/rml/theme.rcss (and the <style> block
+-- of each document). This file holds what the player can change in the
+-- settings, with its defaults, plus the few colours those settings are
+-- computed from: a colour tint mixes the panel glass, borders and accent
+-- towards the chosen colour, so those three are kept here too and must match
+-- the values in theme.rcss.
 --
--- Sizes are in pixels at a 1080-pixel-high screen and scale with resolution.
--- Colours are {r, g, b, a}.
+-- Colours are {r, g, b, a} in 0-1. Sizes are in dp (pixels at 1920x1080).
 --------------------------------------------------------------------------------
 
 return {
 	-- Panel glass. `opacity` is the alpha of the panel body (0 = invisible,
-	-- 1 = solid). Players can change it in game with "/slate opacity 0.6".
+	-- 1 = solid). Players change it in the settings or with "/slate opacity 0.6".
 	opacity      = 0.60,
-	-- Blur the game world behind panels (done by the Slate Blur widget).
-	-- "/slate blur" toggles it, and so does the settings screen.
-	blur         = true,
 	-- Tell other players' Slate your frame rate, system and camera position
 	-- (FPS column, system details and click-to-follow in the players list).
 	broadcast    = true,
 	-- Overall size multiplier on top of resolution scaling.
 	scale        = 1.0,
-	-- Minimap size multiplier. Players change it in the settings screen or by
-	-- dragging the corner grip in tweak mode (Ctrl+F11).
+	-- Minimap size multiplier. Players change it in the settings screen.
 	minimapSize  = 1.0,
-
-	font         = "Saira_SemiCondensed-SemiBold.ttf",
 
 	-- Colour tint. `tint` names one of the entries in `tints`; `tintStrength`
 	-- (0-1) is how far the panel glass, borders and accent lean towards it.
-	-- Players pick both in the settings screen.
+	-- Players pick both in the settings screen or with "/slate tint Blue".
 	tint         = "None",
 	tintStrength = 0.5,
 	tints = {
@@ -43,42 +39,11 @@ return {
 		{ name = "Purple", color = { 0.58, 0.36, 0.92 } },
 	},
 
+	-- The untinted colours (must match theme.rcss)
 	panel        = { 0.050, 0.055, 0.063 },          -- body colour (alpha = opacity)
 	border       = { 1.00, 1.00, 1.00, 0.14 },
-	radius       = 8,
-	margin       = 16,                                -- gap from the screen edge
-	gap          = 16,                                -- gap between stacked panels
-
 	accent       = { 0.663, 0.741, 0.816, 1.0 },      -- headings, active filter, state pips
-	text         = { 0.925, 0.933, 0.941, 1.0 },
-	textDim      = { 0.710, 0.729, 0.757, 1.0 },
-	good         = { 0.608, 0.906, 0.659, 1.0 },      -- income, health
-	bad          = { 1.000, 0.702, 0.651, 1.0 },      -- drain
-	warn         = { 0.949, 0.761, 0.188, 1.0 },      -- active build order, queue badge
 
-	button       = { 1.00, 1.00, 1.00, 0.07 },
-	buttonBorder = { 1.00, 1.00, 1.00, 0.13 },
-	buttonHover  = { 1.00, 1.00, 1.00, 0.16 },
-	buttonActive = { 1.00, 1.00, 1.00, 0.20 },
-	buttonOff    = { 0.00, 0.00, 0.00, 0.55 },        -- overlay on disabled buttons
-	track        = { 1.00, 1.00, 1.00, 0.10 },        -- empty part of a bar
-
-	-- Chat: the body colour per channel. Names take their team colour;
-	-- spectators, who have none, use spectatorName.
-	chat = {
-		public        = { 1.00, 1.00, 1.00, 1 },
-		ally          = { 0.45, 1.00, 0.50, 1 },
-		whisper       = { 1.00, 0.50, 0.50, 1 },
-		spectator     = { 1.00, 0.95, 0.40, 1 },
-		event         = { 0.55, 0.82, 1.00, 1 },   -- speed changes, pause
-		system        = { 0.75, 0.75, 0.75, 1 },   -- engine console output
-		spectatorName = { 0.85, 0.85, 0.85, 1 },
-	},
-
-	-- Two-series charts (income against demand). Checked to stay distinct for
-	-- colour-blind players on a dark panel; team charts use team colours.
-	chartA       = { 0.239, 0.545, 0.910, 1.0 },
-	chartB       = { 0.851, 0.467, 0.184, 1.0 },
-	chartGrid    = { 1.00, 1.00, 1.00, 0.08 },
-	buttonRadius = 5,
+	margin       = 16,                                -- gap from the screen edge, dp
+	gap          = 16,                                -- gap between stacked panels, dp
 }

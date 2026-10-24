@@ -1,0 +1,468 @@
+<rml>
+<head>
+	<title>Slate end graph</title>
+	<link type="text/rcss" href="theme.rcss"/>
+	<style>
+		/* The end-of-game statistics window. Its position is set from Lua
+		   (hud.PlacePanel); its size here must match PANEL_WIDTH and
+		   PANEL_HEIGHT in gui_bastion_endgraph.lua.
+
+		   As in econgraph.rml, the plot (#plot) is drawn with gl UNDER RmlUi,
+		   so the window has no background of its own: every part except #plot
+		   carries the panel color (class "fill") and the parts tile the window
+		   exactly. Use padding, not margins, between parts. */
+		#endgraph {
+			position: absolute;
+			left: 0px;
+			top: 0px;
+			width: 1100dp;
+			height: 660dp;
+			box-sizing: border-box;
+			border: 1dp rgba(255,255,255,36);
+			pointer-events: auto;
+		}
+		.fill {
+			background-color: rgba(11, 14, 18, 235);
+		}
+		.grow {
+			flex: 1;
+		}
+		#head {
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+			height: 50dp;
+			box-sizing: border-box;
+			padding: 0dp 14dp 0dp 16dp;
+			border-bottom: 1dp rgba(255,255,255,36);
+		}
+		#subtitle {
+			margin-left: 14dp;
+			font-size: 13dp;
+			color: #b5bac1;
+		}
+		#total {
+			margin-right: 14dp;
+			font-size: 12dp;
+			color: #b5bac1;
+		}
+		#total-value {
+			color: #f4f5f7;
+		}
+		/* Graph / Awards, in the head */
+		#tabs {
+			display: flex;
+			flex-direction: row;
+			margin-left: 18dp;
+		}
+		#tabs .tab {
+			padding-top: 2dp;
+			padding-bottom: 3dp;
+		}
+
+		/* ---- the awards pane: covers #main, with the plot hole under it -------- */
+		#awards {
+			position: absolute;
+			left: 0dp;
+			top: 50dp;
+			width: 100%;
+			height: 608dp;
+			box-sizing: border-box;
+			padding: 18dp 24dp 16dp 24dp;
+			background-color: rgba(11, 14, 18, 245);
+			overflow-y: auto;
+		}
+		#awards-wait {
+			margin-top: 200dp;
+			text-align: center;
+			font-size: 14dp;
+			color: #b5bac1;
+		}
+		/* the final ranks: a table, one row per player, a column per track */
+		#final-ranks {
+			display: flex;
+			flex-direction: column;
+			margin-bottom: 16dp;
+		}
+		.rankrow {
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+			height: 26dp;
+			border-bottom: 1dp rgba(255,255,255,36);
+		}
+		.rankrow.head {
+			height: 30dp;
+			border-bottom: 1dp rgba(255,255,255,60);
+		}
+		.rankrow .who {
+			width: 220dp;
+			font-size: 13dp;
+			white-space: nowrap;
+			overflow: hidden;
+		}
+		.rankrow .col {
+			width: 190dp;
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+		}
+		.rankrow.head .col img {
+			width: 16dp;
+			height: 16dp;
+			margin-right: 7dp;
+		}
+		.rankrow .lv {
+			width: 26dp;
+			font-weight: bold;
+			font-size: 13dp;
+			letter-spacing: 1dp;
+			color: #f4f5f7;
+		}
+		.rankrow .lv.none { color: #8a9099; }
+		.rankrow .lv.max { color: #a9bdd0; }
+		.rankrow .ttl {
+			font-size: 11dp;
+			letter-spacing: 1dp;
+			text-transform: uppercase;
+			color: #b5bac1;
+			white-space: nowrap;
+		}
+		.rankrow .ttl.max { color: #a9bdd0; }
+
+		#awards-head {
+			margin-bottom: 8dp;
+		}
+		#award-rows {
+			display: flex;
+			flex-direction: row;
+			flex-wrap: wrap;
+		}
+		/* one award. It starts out of place and clear; the widget brings each
+		   one in, one after another. */
+		.award {
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+			width: 50%;
+			box-sizing: border-box;
+			height: 56dp;
+			margin-bottom: 6dp;
+			padding: 6dp 14dp 6dp 10dp;
+			border-left: 3dp rgba(255,255,255,36);
+			background-color: rgba(255,255,255,10);
+			opacity: 0;
+			margin-left: 24dp;
+		}
+		.award.in {
+			opacity: 1;
+			margin-left: 0dp;
+		}
+		.award.alliance {
+			width: 100%;
+			border-left: 3dp rgba(255,255,255,60);
+		}
+		.award.mine {
+			border-left: 3dp #a9bdd0;
+			background-color: rgba(255,255,255,18);
+		}
+		.award .emblem {
+			width: 36dp;
+			height: 36dp;
+			margin-right: 12dp;
+		}
+		.award .text {
+			flex: 1;
+			overflow: hidden;
+		}
+		.award .name {
+			font-family: Saira SemiCondensed;
+			font-weight: bold;
+			font-size: 15dp;
+			letter-spacing: 1.5dp;
+			text-transform: uppercase;
+			color: #f4f5f7;
+			white-space: nowrap;
+		}
+		.award .figure {
+			font-size: 12dp;
+			color: #b5bac1;
+			white-space: nowrap;
+		}
+		.award .winner {
+			margin-left: 12dp;
+			text-align: right;
+			font-weight: bold;
+			font-size: 14dp;
+			white-space: nowrap;
+		}
+		.award .winner .sub {
+			font-weight: normal;
+			font-size: 11dp;
+			color: #b5bac1;
+		}
+		/* 660 less the borders and the head */
+		#main {
+			display: flex;
+			flex-direction: row;
+			height: 608dp;
+		}
+
+		/* ---- left: which figure, and whose lines -------------------------------- */
+		#side {
+			display: flex;
+			flex-direction: column;
+			width: 200dp;
+			box-sizing: border-box;
+			padding: 10dp 12dp 10dp 16dp;
+			border-right: 1dp rgba(255,255,255,36);
+		}
+		.pick {
+			height: 26dp;
+			box-sizing: border-box;
+			margin-bottom: 4dp;
+			padding-left: 9dp;
+			font-size: 13dp;
+			line-height: 24dp;
+			color: #b5bac1;
+			background-color: rgba(255,255,255,10);
+			border: 1dp rgba(255,255,255,36);
+			border-left: 2dp rgba(255,255,255,36);
+		}
+		.pick:hover {
+			color: #f4f5f7;
+			background-color: rgba(255,255,255,18);
+		}
+		.pick.active {
+			color: #f4f5f7;
+			background-color: rgba(255,255,255,18);
+			border-left: 2dp #a9bdd0;
+		}
+		#delta {
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+			margin-top: 6dp;
+		}
+		#delta-box {
+			width: 12dp;
+			height: 12dp;
+			margin-right: 8dp;
+			box-sizing: border-box;
+			background-color: #0d0e10;
+			border: 1dp rgba(255,255,255,60);
+		}
+		#delta.active #delta-box {
+			background-color: #a9bdd0;
+			border-color: #a9bdd0;
+		}
+		#delta.active {
+			border-left: 2dp #a9bdd0;
+		}
+		#teams-head {
+			height: 16dp;
+			margin-top: 12dp;
+			font-size: 10dp;
+		}
+		#legend {
+			flex: 1;
+			overflow-y: auto;
+			overflow-x: hidden;
+		}
+		/* one team; a click hides or shows its line */
+		.lrow {
+			display: flex;
+			flex-direction: row;
+			align-items: center;
+			height: 22dp;
+			padding: 0dp 4dp;
+			font-size: 13dp;
+		}
+		.lrow:hover {
+			background-color: rgba(255,255,255,18);
+		}
+		.sw {
+			width: 12dp;
+			height: 12dp;
+			margin-right: 7dp;
+			box-sizing: border-box;
+		}
+		.lname {
+			flex: 1;
+			white-space: nowrap;
+			overflow: hidden;
+		}
+		.lrow.off .sw {
+			opacity: 0.35;
+		}
+		.lrow.off .lname {
+			color: #8a9099;
+		}
+
+		/* ---- right: the plot and its scales --------------------------------------- */
+		#right {
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+		}
+		#right-top {
+			height: 10dp;
+		}
+		#plotrow {
+			display: flex;
+			flex-direction: row;
+			height: 576dp;
+		}
+		#axis {
+			position: relative;
+			width: 50dp;
+		}
+		/* gl draws here */
+		#plot {
+			position: relative;
+			flex: 1;
+		}
+		#values {
+			position: relative;
+			width: 56dp;
+		}
+		.tick {
+			position: absolute;
+			right: 6dp;
+			height: 14dp;
+			margin-bottom: -7dp;
+			font-size: 11dp;
+			line-height: 14dp;
+			color: #b5bac1;
+		}
+		#ax0 { bottom: 0%; margin-bottom: 0dp; }
+		#ax1 { bottom: 20%; }
+		#ax2 { bottom: 40%; }
+		#ax3 { bottom: 60%; }
+		#ax4 { bottom: 80%; }
+		#ax5 { bottom: 100%; margin-bottom: -14dp; }
+		/* each line's last value, right of where the line ends */
+		.end {
+			position: absolute;
+			left: 6dp;
+			height: 14dp;
+			margin-bottom: -7dp;
+			font-weight: bold;
+			font-size: 12dp;
+			line-height: 14dp;
+		}
+		#nodata {
+			position: absolute;
+			left: 0dp;
+			top: 46%;
+			width: 100%;
+			text-align: center;
+			font-size: 15dp;
+			color: #b5bac1;
+		}
+		#times {
+			height: 22dp;
+			box-sizing: border-box;
+			padding: 0dp 56dp 0dp 50dp;
+		}
+		#times-inner {
+			position: relative;
+			height: 22dp;
+		}
+		.time {
+			position: absolute;
+			top: 4dp;
+			width: 60dp;
+			margin-left: -30dp;
+			text-align: center;
+			font-size: 11dp;
+			color: #b5bac1;
+		}
+		#tm0 { left: 0%; margin-left: 0dp; text-align: left; }
+		#tm1 { left: 20%; }
+		#tm2 { left: 40%; }
+		#tm3 { left: 60%; }
+		#tm4 { left: 80%; }
+		#tm5 { left: 100%; margin-left: -60dp; text-align: right; }
+
+		/* ---- what is under the mouse in the plot ----------------------------------- */
+		#tip {
+			position: absolute;
+			padding: 6dp 9dp;
+			font-size: 12dp;
+			line-height: 16dp;
+			white-space: nowrap;
+			pointer-events: none;
+			background-color: rgba(5, 7, 10, 240);
+			border: 1dp rgba(255,255,255,60);
+		}
+		#tip .d { color: #b5bac1; }
+		#tip .n { color: #f4f5f7; }
+	</style>
+</head>
+<body>
+	<div id="endgraph" class="hidden">
+		
+		
+		<div id="head" class="fill">
+			<div id="title" class="title"/>
+			<div id="subtitle"/>
+			<div id="tabs">
+				<div id="tab-graph" class="tab active">Graph</div>
+				<div id="tab-awards" class="tab">Awards</div>
+			</div>
+			<div class="grow"/>
+			<div id="total">Total time <span id="total-value"/></div>
+			<div id="close" class="close">X</div>
+		</div>
+		<div id="main">
+			<div id="side" class="fill">
+				<div id="stats"/>
+				<div id="delta" class="pick">
+					<div id="delta-box"/>
+					<div>Delta (rate)</div>
+				</div>
+				<div id="teams-head" class="label">Teams</div>
+				<div id="legend"/>
+			</div>
+			<div id="right">
+				<div id="right-top" class="fill"/>
+				<div id="plotrow">
+					<div id="axis" class="fill">
+						<div id="ax0" class="tick"/>
+						<div id="ax1" class="tick"/>
+						<div id="ax2" class="tick"/>
+						<div id="ax3" class="tick"/>
+						<div id="ax4" class="tick"/>
+						<div id="ax5" class="tick"/>
+					</div>
+					<div id="plot">
+						<div id="nodata">Collecting stats data...</div>
+					</div>
+					<div id="values" class="fill"/>
+				</div>
+				<div id="times" class="fill">
+					<div id="times-inner">
+						<div id="tm0" class="time"/>
+						<div id="tm1" class="time"/>
+						<div id="tm2" class="time"/>
+						<div id="tm3" class="time"/>
+						<div id="tm4" class="time"/>
+						<div id="tm5" class="time"/>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div id="awards" class="hidden">
+			<div id="awards-wait">Awards are handed out when the game ends.</div>
+			<div id="awards-body" class="hidden">
+				<div id="ranks-head" class="label">Final ranks</div>
+				<div id="final-ranks"/>
+				<div id="awards-head" class="label">Awards</div>
+				<div id="award-rows"/>
+			</div>
+		</div>
+		<div id="tip" class="hidden"/>
+	</div>
+</body>
+</rml>

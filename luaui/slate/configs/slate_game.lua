@@ -3,7 +3,7 @@
 --
 -- Everything Slate needs to know about the game it is running in. The panel
 -- widgets read only this table, so adopting Slate in another Total
--- Annihilation style game means copying the slate_* widgets plus the two
+-- Annihilation style game means copying the luaui/slate/ folder plus the two
 -- slate_*.lua config files, then editing this one.
 --------------------------------------------------------------------------------
 
@@ -22,14 +22,16 @@ end
 
 return {
 	-- Resources shown in the resource bar, left to right. `key` is the engine
-	-- resource name passed to Spring.GetTeamResources.
+	-- resource name passed to Spring.GetTeamResources; `icon` a file in
+	-- luaui/slate/images/ (premultiplied alpha, see theme.rcss) or nil.
 	resources = {
-		{ key = "metal",  label = "Metal",  color = { 0.788, 0.827, 0.871, 1 } },
-		{ key = "energy", label = "Energy", color = { 0.949, 0.831, 0.361, 1 } },
+		{ key = "metal",  label = "Metal",  color = "#c9d3de", icon = "metal.png" },
+		{ key = "energy", label = "Energy", color = "#f2d45c", icon = "energy.png" },
 	},
 
-	-- Optional read-outs under the resource bar. Players toggle them with
-	-- "/slate wind" and "/slate tidal". Tidal hides itself on maps without water.
+	-- Optional read-outs at the right end of the resource bar. Players toggle
+	-- them in the settings or with "/slate wind" and "/slate tidal". Tidal
+	-- hides itself on maps without water.
 	addons = {
 		wind  = true,
 		tidal = true,
@@ -45,8 +47,9 @@ return {
 		{ label = "Factories", match = function(ud) return ud.isFactory end },
 		{ label = "Units",     match = function(ud) return not ud.isImmobile end },
 	},
-	-- Picture for a build tile or the selection panel.
-	unitPicture = function(unitDefID) return "#" .. unitDefID end,
+	-- Picture for a build tile or the selection panel: a file path. Leave nil
+	-- to use the engine's build picture (unitpics/<name>.<ext>).
+	unitPicturePath = nil,
 
 	-- Commands never shown in the order grid (matched against the command's
 	-- action name). The engine still accepts them from hotkeys.
@@ -84,24 +87,21 @@ return {
 	-- you cannot see). Players can still switch it off.
 	losView = true,
 
-	-- Sounds for incoming chat by channel (public, ally, spectator, whisper),
-	-- as names for Spring.PlaySoundFile. Leave nil for silence.
-	chatSounds = nil,
-
-	-- Entries in the Menu dropdown. `command` goes to Spring.SendCommands.
-	-- `confirm` asks for a second click; `playersOnly` hides the entry from
-	-- spectators. Resign gives up your team and leaves you watching; Quit
-	-- closes the game to the desktop.
-	menu = {
-		{ label = "Settings",        command = "slate settings" },
-		{ label = "Economy graph",   command = "slate economy" },
-		{ label = "Team statistics", command = "slate stats" },
-		{ label = "Share (H)",       command = "slate share" },
-		{ label = "Chat log",        command = "slate log" },
-		{ label = "Key bindings",    command = "slate keys" },
-		{ label = "Widgets (F11)",   command = "slate widgets" },
-		{ label = "Pause",           command = "pause" },
-		{ label = "Resign",          command = "spectator", confirm = true, playersOnly = true },
-		{ label = "Quit",            command = "quitforce", confirm = true },
+	-- Interface sounds, as names or paths for Spring.PlaySoundFile. Leave an
+	-- entry nil for silence. click/hover are the buttons; the chat entries
+	-- are incoming chat by channel.
+	sounds = {
+		click    = "luaui/sounds/buildbar_click.wav",
+		hover    = nil,
+		chat     = "luaui/sounds/message_admin.wav",
+		allychat = "luaui/sounds/message_team.wav",
+		specchat = nil,
+		whisper  = "luaui/sounds/message_private.wav",
 	},
+
+	-- Extra entries in the game menu, after Slate's own (settings, graphs,
+	-- share, log, key bindings, widgets). `command` goes to Spring.SendCommands;
+	-- `confirm` asks for a second click; `playersOnly` hides the entry from
+	-- spectators.
+	menu = {},
 }
