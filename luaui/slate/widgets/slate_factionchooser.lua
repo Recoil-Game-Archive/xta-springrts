@@ -32,7 +32,7 @@ end
 --  one need do nothing, the widget removes itself quietly. A game that wants
 --  it provides:
 --
---    a gadget (game_spawn in Splinter Faction) that
+--    a gadget (game_spawn.lua in the game it came from) that
 --      - sets the game rules param "phase" to "faction" while the choice is
 --        open and to anything else ("placement", "done") once it is over;
 --      - sets "factionDeadlineFrame" to the game frame the choice closes at;

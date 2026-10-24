@@ -40,7 +40,7 @@ end
 --    titles=}, ... } and optionally upgrades = { {id=, name=, param=, effect=,
 --    mults=, titles=}, ... }. The gadget should read the same file;
 --
---    a gadget (game_rank_tracks.lua in Splinter Faction) that, for every
+--    a gadget (game_rank_tracks.lua in the game it came from) that, for every
 --    player team, sets the team rules params rank_<track id>_level and
 --    rank_<track id>_value (from its Initialize on, so a reload finds them);
 --    scales the "territory" track to the map and publishes the result as the

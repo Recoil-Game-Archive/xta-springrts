@@ -2,10 +2,13 @@
 -- Sound tab
 --------------------------------------------------------------------------------
 
--- The artists are the folders under Music/ (the player reads the same ones)
+-- The artists are the folders under music/ and sounds/music/ (the player reads the same ones)
 local artistNames, artistFolders = { "All artists" }, { "" }
 do
-	local dirs = VFS.SubDirs("music/", "*") or {}
+	local dirs = {}
+	for _, base in ipairs({ "music/", "sounds/music/" }) do
+		for _, dir in ipairs(VFS.SubDirs(base, "*") or {}) do dirs[#dirs + 1] = dir end
+	end
 	table.sort(dirs)
 	for _, dir in ipairs(dirs) do
 		local folder = dir:gsub("[/\\]+$", ""):match("[^/\\]+$")
@@ -64,7 +67,6 @@ return {
 			{ id = "musicsilencemax", name = "Longest silence", type = "slider", min = 10, max = 120, step = 5, config = "music_silence_max", default = 60, format = "%ds",
 			  desc = "A silence lasts a random time up to this." },
 			{ id = "musicfades", name = "Fade between tracks", type = "bool", config = "UseSoundtrackFades" },
-			{ id = "musicloadscreen", name = "Play on loading screen", type = "bool", config = "music_loadscreen", restart = true },
 		  } },
 		{ id = "ambientsounds", name = "Ambient map sounds", type = "bool", widget = "Ambient Background Sound Player", requires = "Ambient Background Sound Player" },
 

@@ -8,7 +8,7 @@
 		   The card (#rankup) slams in under the resource bar when a rank is
 		   reached and goes away by itself. Neither takes the mouse. Positions
 		   are set from Lua (hud.PlacePanel); the sizes here must match the
-		   constants in gui_bastion_ranks.lua. */
+		   constants in slate_ranks.lua. */
 
 		/* ---- the strip: four rows under the menu button ---- */
 
@@ -32,6 +32,7 @@
 			flex-direction: row;
 			align-items: center;
 			border-left: 2dp rgba(255,255,255,36);
+			border-radius: 5dp;
 		}
 		.cell.last {
 			margin-bottom: 0dp;
@@ -111,7 +112,8 @@
 			color: #b5bac1;
 		}
 
-		/* ---- the card ---- */
+		/* ---- the card: a rounded panel with an accent border (the border
+		   colour is restated from Lua so it follows the tint) ---- */
 
 		#rankup {
 			position: absolute;
@@ -121,22 +123,9 @@
 			height: 252dp;
 			box-sizing: border-box;
 			padding: 12dp 16dp 16dp 16dp;
-			border: 1dp rgba(255,255,255,60);
+			border: 2dp #a9bdd0;
+			border-radius: 8dp;
 			text-align: center;
-		}
-		#rankup .bracket {
-			width: 10dp;
-			height: 10dp;
-		}
-		#rankup .bracket.tl { border-left: 3dp #a9bdd0; border-top: 3dp #a9bdd0; }
-		#rankup .bracket.tr { right: -1dp; top: -1dp; border-right: 3dp #a9bdd0; border-top: 3dp #a9bdd0; }
-		#rankup .bracket.bl { left: -1dp; bottom: -1dp; border-left: 3dp #a9bdd0; border-bottom: 3dp #a9bdd0; }
-		#rankup .bracket.br { border-right: 3dp #a9bdd0; border-bottom: 3dp #a9bdd0; }
-		#rankup-rule {
-			position: absolute;
-			left: 0dp;
-			top: 0dp;
-			width: 100%;
 		}
 		#rankup-track {
 			display: flex;
@@ -167,6 +156,7 @@
 			background-color: #0d0e10;
 			border: 2dp rgba(255,255,255,36);
 		}
+		/* the frame keeps square corners: its rank decorations sit on them */
 		#rankup-frame .fb {
 			position: absolute;
 			width: 10dp;
@@ -203,12 +193,12 @@
 			width: 54dp;
 			height: 54dp;
 		}
-		/* rank II: the standard pair of ember brackets */
+		/* rank II: the standard pair of accent corners */
 		#rankup-frame.t2 .fb.tl, #rankup-frame.t2 .fb.br { border-color: #a9bdd0; }
 		/* rank III: all four corners */
 		#rankup-frame.t3 { border-color: rgba(255,255,255,60); }
 		#rankup-frame.t3 .fb { display: block; border-color: #a9bdd0; }
-		/* rank IV: heavier brackets, the accent line */
+		/* rank IV: heavier corners, the accent line */
 		#rankup-frame.t4 { border-color: rgba(255,255,255,60); }
 		#rankup-frame.t4 .fb { display: block; width: 12dp; height: 12dp; border-color: #a9bdd0; }
 		#rankup-frame.t4 .fb.tl, #rankup-frame.t4 .fb.bl { border-left-width: 3dp; }
@@ -216,7 +206,7 @@
 		#rankup-frame.t4 .fb.tl, #rankup-frame.t4 .fb.tr { border-top-width: 3dp; }
 		#rankup-frame.t4 .fb.bl, #rankup-frame.t4 .fb.br { border-bottom-width: 3dp; }
 		#rankup-frame.t4 .top { display: block; }
-		/* rank V: solid ember, with the dim inner square */
+		/* rank V: solid accent, with the dim inner square */
 		#rankup-frame.t5 { border-color: #a9bdd0; }
 		#rankup-frame.t5 .fb { display: block; width: 13dp; height: 13dp; border-color: #a9bdd0; }
 		#rankup-frame.t5 .fb.tl, #rankup-frame.t5 .fb.bl { border-left-width: 3dp; }
@@ -334,11 +324,6 @@
 	</div>
 
 	<div id="rankup" class="panel hidden">
-		<div class="bracket tr"/>
-		<div class="bracket bl"/>
-		
-		<div id="rankup-rule" class="accent-line"/>
-
 		<div id="rankup-track">
 			<div class="dash"/>
 			<div id="rankup-track-text">Combat · Rank IV</div>

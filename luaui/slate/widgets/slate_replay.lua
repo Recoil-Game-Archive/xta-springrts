@@ -9,7 +9,7 @@ function widget:GetInfo()
 		author  = "Scary le Poo",
 		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
-		layer   = 0,
+		layer   = 3,   -- after the resource bar (1), which it sits under
 		enabled = true,
 	}
 end
@@ -81,7 +81,7 @@ end
 -- under where it would be when it is not running.
 local function DefaultOrigin(vsx, vsy, w, h, scale)
 	local layout = WG.SlateLayout
-	local x1, y1, x2 = nil, nil, nil
+	local x1, y1, x2
 	if layout and layout.GetRect then
 		x1, y1, x2 = layout.GetRect(RESOURCE_BAR_LAYOUT)
 	end
