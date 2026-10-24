@@ -7,7 +7,7 @@ function widget:GetInfo()
 		license = "GPLv2",
 		version = "1.0",
 		layer = 1,
-		enabled = true
+		enabled = false, -- replaced by Slate (luaui/slate/); switch back on if Slate is removed
 	}
 end
 

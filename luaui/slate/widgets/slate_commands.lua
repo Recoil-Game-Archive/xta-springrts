@@ -1,49 +1,76 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Build and Order Menu",
 		desc    = "Build grid with category filters and paging, plus the order and unit-state buttons. Replaces the engine's command menu.",
 		author  = "Scary le Poo",
-		date    = "2026-10-08",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = 0,
 		enabled = true,
-		handler = true,
+		handler = true, -- the real widgetHandler: this widget takes over the command layout
 	}
 end
 
-local BUILD_ID, ORDER_ID = "buildmenu", "ordermenu"
+--------------------------------------------------------------------------------
+--  Two panels at the bottom left. The orders panel holds the selected units'
+--  commands (move, attack...) five to a row, and under them the unit states
+--  (fire at will, hold fire...), each naming the state it is in with a row
+--  of pips showing which one of how many. The build panel stands on the
+--  orders panel: a header with the builder's name and the page, a row of
+--  category chips from slate_game.lua, and a grid of build tiles with the
+--  metal cost, the hotkey and how many are queued.
+--
+--  Left click gives the command, right click on a build tile takes one off
+--  the queue, and the modifier keys work as they do everywhere else. The
+--  mouse wheel over the build panel turns the page.
+--
+--  The selection panel is told what the mouse is over (WG.Slate.hover), and
+--  the hotbind widget which action a Ctrl+Insert would bind
+--  (WG.Slate.hoverAction). WG.SlateCommands gives other widgets the hovered
+--  command and the panels' rectangles.
+--------------------------------------------------------------------------------
 
--- design pixels
-local PANEL_W        = 300
-local BUILD_H        = 452
-local ORDER_H        = 264
-local MINIMAP_H      = 300      -- assumed minimap frame height until Slate Minimap reports the real one
-local PAD            = 10
-local GAP            = 6
-local HEADER_H       = 28
-local CHIP_H         = 30
-local ORDER_HEADER_H = 22
+local DOCUMENT_PATH = "commands.rml"
+local QUEUE_INTERVAL = 0.25
 
-local spGetActiveCmdDescs   = Spring.GetActiveCmdDescs
-local spGetActiveCommand    = Spring.GetActiveCommand
-local spGetCmdDescIndex     = Spring.GetCmdDescIndex
-local spSetActiveCommand    = Spring.SetActiveCommand
-local spGetModKeyState      = Spring.GetModKeyState
-local spGetMouseState       = Spring.GetMouseState
-local spGetSelectedUnits    = Spring.GetSelectedUnits
-local spGetUnitDefID        = Spring.GetUnitDefID
-local spGetFullBuildQueue   = Spring.GetFullBuildQueue
-local spGetActionHotKeys    = Spring.GetActionHotKeys
-local spForceLayoutUpdate   = Spring.ForceLayoutUpdate
+-- must match #build and #orders in commands.rml
+local PANEL_WIDTH  = 300
+local BUILD_HEIGHT = 452
+local PAD          = 10
+local GAP          = 6
+local HEADER_H     = 28
+local CHIP_H       = 30
+local ORDER_HEAD_H = 22
+local ORDER_H      = 38
+local STATE_H      = 44
+local ORDER_MIN_H  = 264
+
+local LAYOUT_BUILD = "slate_buildmenu"
+local LAYOUT_ORDER = "slate_ordermenu"
+
+local spGetActiveCmdDescs = Spring.GetActiveCmdDescs
+local spGetActiveCommand  = Spring.GetActiveCommand
+local spGetCmdDescIndex   = Spring.GetCmdDescIndex
+local spSetActiveCommand  = Spring.SetActiveCommand
+local spGetModKeyState    = Spring.GetModKeyState
+local spGetSelectedUnits  = Spring.GetSelectedUnits
+local spGetUnitDefID      = Spring.GetUnitDefID
+local spGetFullBuildQueue = Spring.GetFullBuildQueue
+local spGetActionHotKeys  = Spring.GetActionHotKeys
+local spForceLayoutUpdate = Spring.ForceLayoutUpdate
+local spGetMouseState     = Spring.GetMouseState
+
 local floor, ceil = math.floor, math.ceil
 local min, max = math.min, math.max
+local concat = table.concat
 
-local S
-local bx1, by1, bx2, by2            -- build panel
-local ox1, oy1, ox2, oy2            -- order panel
+local hud, S
+local document
+local view
 
 local dirty = true
 local builds, orders, states = {}, {}, {}
@@ -51,18 +78,18 @@ local filtered = {}                 -- builds after the category filter
 local chips = {}                    -- { label, cat } ; cat == nil is "All"
 local filter = nil                  -- selected category table, nil = All
 local page, pageCount = 1, 1
-local buildSignature = ""
+local buildSignature = ""           -- which builder: a change resets filter and page
 local builderName = ""
 local queued = {}                   -- unitDefID -> count in the selected factory's queue
 local queueTimer = 0
-local queueSignature = 0           -- changes when the queue counts change
-local refreshCount = 0             -- goes up each time the command list is re-read
+local activeCmdID
+local showBuild, showOrders = false, false
 
--- Hit rectangles rebuilt every frame by the draw code:
--- { x1, y1, x2, y2, kind = "build"|"order"|"state"|"chip"|"prev"|"next", cmd =, chip = }
-local hits = {}
-local pressed                       -- the hit the mouse went down on
-local myHover = false
+local shownGrid, shownChips, shownOrders, shownStates -- what the markup was made from
+local pageCards = {}                -- build cmds on the current page; tile i has data-b="i"
+local hovered                       -- { kind = "build"|"order"|"state", cmd = } while the mouse is on a button
+local buildRect, orderRect          -- {x1, y1, x2, y2} in screen pixels, y up
+local orderHeight = ORDER_MIN_H
 
 -- Taking over the menu makes the engine flag every command as hidden, so the
 -- commands the game itself hides are noted before that happens.
@@ -103,6 +130,7 @@ local function Refresh()
 					builds[#builds + 1] = cmd
 				end
 			elseif t == CMDTYPE.ICON_MODE and cmd.params and #cmd.params > 1 then
+				cmd.slateKey = HotKey(cmd.action)
 				states[#states + 1] = cmd
 			elseif (cmd.name and cmd.name ~= "") or (cmd.texture and cmd.texture ~= "") then
 				cmd.slateLabel = CleanName(cmd.name)
@@ -152,16 +180,17 @@ local function Refresh()
 	if #sel == 0 then
 		builderName = ""
 	elseif same and firstDef and UnitDefs[firstDef] then
-		local ud = UnitDefs[firstDef]
-		builderName = ud.translatedHumanName or ud.humanName or ud.name or ""
+		builderName = hud.UnitName(UnitDefs[firstDef])
 	else
 		builderName = #sel .. " units"
 	end
+
+	showBuild = #builds > 0
+	showOrders = (#orders + #states) > 0
 end
 
 local function RefreshQueue()
 	queued = {}
-	queueSignature = 0
 	if #builds == 0 or not spGetFullBuildQueue then return end
 	local sel = spGetSelectedUnits() or {}
 	for i = 1, #sel do
@@ -172,9 +201,6 @@ local function RefreshQueue()
 				for defID, count in pairs(q[j]) do
 					queued[defID] = (queued[defID] or 0) + count
 				end
-			end
-			for defID, count in pairs(queued) do
-				queueSignature = queueSignature + defID * 7 + count * 1009
 			end
 			return
 		end
@@ -202,346 +228,218 @@ local function HideEngineMenu()
 	spForceLayoutUpdate()
 end
 
-local function Layout()
-	local t = S.theme
-	ox1, oy1, ox2, oy2 = S.Box(ORDER_ID, "l", "b", t.margin, t.margin, PANEL_W, ORDER_H)
-	-- the build menu stands on the orders menu and follows it if it is moved,
-	-- so it stays put whatever shape the minimap takes
-	bx1, by1, bx2, by2 = S.Box(BUILD_ID, "l", "b", ox1 / S.scale, oy2 / S.scale + t.gap, PANEL_W, BUILD_H)
-end
-
-function widget:Initialize()
-	S = WG.Slate
-	if not S then
-		widgetHandler:RemoveWidget(self)
-		return
-	end
-	HideEngineMenu()
-	S.Register(BUILD_ID, "Build menu", Layout)
-	S.Register(ORDER_ID, "Orders", Layout)
-	S.OnChange(BUILD_ID, function() Layout() ; dirty = true end)
-	Layout()
-end
-
-function widget:Shutdown()
-	widgetHandler:ConfigLayoutHandler(true)
-	spForceLayoutUpdate()
-	if S then
-		S.Unregister(BUILD_ID) ; S.Unregister(ORDER_ID)
-		S.OffChange(BUILD_ID)
-		S.Unblur(BUILD_ID) ; S.Unblur(ORDER_ID)
-		if myHover then S.hover = nil ; S.hoverAction = nil end
-	end
-end
-
-function widget:ViewResize()
-	if S and WG.Slate == S then Layout() end
-end
-
-function widget:CommandsChanged()
-	dirty = true
-end
-
-function widget:SelectionChanged()
-	dirty = true
-end
-
-function widget:Update(dt)
-	queueTimer = queueTimer + dt
-	if queueTimer > 0.25 then
-		queueTimer = 0
-		if S and WG.Slate == S then RefreshQueue() end
-	end
-end
-
 --------------------------------------------------------------------------------
--- Drawing
+-- Markup
 --------------------------------------------------------------------------------
 
-local function AddHit(x1, y1, x2, y2, kind, data)
-	hits[#hits + 1] = { x1 = x1, y1 = y1, x2 = x2, y2 = y2, kind = kind, data = data }
-end
-
-local function Hovered(x1, y1, x2, y2, mx, my)
-	return mx >= x1 and mx <= x2 and my >= y1 and my <= y2
-end
-
-local function DrawArrow(x1, y1, x2, y2, label, kind, enabled, mx, my)
-	local t = S.theme
-	S.Button(x1, y1, x2, y2, (enabled and Hovered(x1, y1, x2, y2, mx, my)) and "hover" or nil)
-	S.Text(label, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 15, enabled and t.text or t.textDim, "cv")
-	if enabled then AddHit(x1, y1, x2, y2, kind) end
-end
-
-local hoverBuildCmd
-
-local function DrawBuildPanel(mx, my, activeID)
-	local t = S.theme
-	S.Panel(bx1, by1, bx2, by2)
-	S.Blur(BUILD_ID, bx1, by1, bx2, by2)
-
-	local pad, gap = S.px(PAD), S.px(GAP)
-	local ix1, ix2 = bx1 + pad, bx2 - pad
-	local y = by2 - pad
-
-	-- header: title, builder, paging
-	local hh = S.px(HEADER_H)
-	local hy = y - hh
-	local tx = ix1
-	S.Text("BUILD", tx, hy + hh * 0.5, 12, t.accent, "v")
-	tx = tx + S.TextWidth("BUILD", 12) + S.px(8)
-	local pagerW = (pageCount > 1) and (hh * 2 + S.px(52)) or 0
-	S.Text(S.Fit(builderName, 14, ix2 - pagerW - tx - S.px(4)), tx, hy + hh * 0.5, 14, t.textDim, "v")
-	if pageCount > 1 then
-		DrawArrow(ix2 - hh, hy, ix2, y, ">", "next", page < pageCount, mx, my)
-		S.Text(page .. " / " .. pageCount, ix2 - hh - S.px(26), hy + hh * 0.5, 14, t.text, "cv")
-		DrawArrow(ix2 - hh * 2 - S.px(52), hy, ix2 - hh - S.px(52), y, "<", "prev", page > 1, mx, my)
-	end
-	y = hy - gap
-
-	-- category chips
-	if #chips > 0 then
-		local ch = S.px(CHIP_H)
-		local cw = ((ix2 - ix1) - gap * (#chips - 1)) / #chips
-		for i = 1, #chips do
-			local c = chips[i]
-			local cx1 = floor(ix1 + (i - 1) * (cw + gap))
-			local cx2 = floor(cx1 + cw)
-			local on = (c.cat == filter)
-			S.Button(cx1, y - ch, cx2, y, on and "active" or (Hovered(cx1, y - ch, cx2, y, mx, my) and "hover" or nil))
-			S.Text(S.Fit(c.label, 13, cw - S.px(6)), (cx1 + cx2) * 0.5, y - ch * 0.5, 13, t.text, "cv")
-			AddHit(cx1, y - ch, cx2, y, "chip", c)
-		end
-		y = y - ch - gap
-	end
-
-	-- build grid
+local function TileSize()
 	local cols = S.game.buildColumns or 4
 	local rows = S.game.buildRows or 5
-	local tw = ((ix2 - ix1) - gap * (cols - 1)) / cols
-	local th = ((y - (by1 + pad)) - gap * (rows - 1)) / rows
-	local first = (page - 1) * cols * rows
-	local picture = S.game.unitPicture
-	local hoverDef
-	hoverBuildCmd = nil
+	local inner = PANEL_WIDTH - PAD * 2
+	local w = floor((inner - GAP * (cols - 1)) / cols)
+	local avail = BUILD_HEIGHT - PAD * 2 - HEADER_H - GAP - ((#chips > 0) and (CHIP_H + GAP) or 0)
+	local h = floor((avail - GAP * (rows - 1)) / rows)
+	return cols, rows, w, min(w, h)
+end
 
+local function ShowChips()
+	local parts = {}
+	for i = 1, #chips do
+		local c = chips[i]
+		parts[i] = string.format('<div class="chip tile%s%s" data-c="%d">%s</div>',
+			(c.cat == filter) and " active" or "", (i == #chips) and " last" or "", i, hud.Escape(c.label))
+	end
+	local signature = concat(parts)
+	if signature ~= shownChips then
+		shownChips = signature
+		view.Element("chips").inner_rml = signature
+	end
+	view.SetClass("chips", "hidden", #chips == 0)
+end
+
+local function ShowGrid()
+	local cols, rows, w, h = TileSize()
+	local first = (page - 1) * cols * rows
+	pageCards = {}
+	local parts = {}
 	for i = 1, cols * rows do
 		local cmd = filtered[first + i]
 		if not cmd then break end
-		local col = (i - 1) % cols
-		local row = floor((i - 1) / cols)
-		local x1 = floor(ix1 + col * (tw + gap))
-		local x2 = floor(x1 + tw)
-		local y2 = floor(y - row * (th + gap))
-		local y1 = floor(y2 - th)
+		pageCards[i] = cmd
 		local defID = -cmd.id
 		local ud = UnitDefs[defID]
-		local over = Hovered(x1, y1, x2, y2, mx, my)
-
-		S.Icon(x1 + 1, y1 + 1, x2 - 1, y2 - 1, picture and picture(defID) or ("#" .. defID))
-		-- cost strip so the number reads over any picture
-		local strip = S.px(16)
-		S.Rect(x1 + 1, y1 + 1, x2 - 1, y1 + strip, { 0, 0, 0, 0.60 }, 0)
-		if cmd.disabled then
-			S.Rect(x1 + 1, y1 + 1, x2 - 1, y2 - 1, t.buttonOff, 0)
-		end
-		local r = S.px(t.buttonRadius)
-		if cmd.id == activeID then
-			S.Outline(x1, y1, x2, y2, t.warn, r, max(2, S.px(2)))
-		elseif over and not cmd.disabled then
-			S.Outline(x1, y1, x2, y2, t.accent, r, max(1, S.px(1.5)))
-		else
-			S.Outline(x1, y1, x2, y2, t.buttonBorder, r, 1)
-		end
-		S.Text(S.Cost(ud.metalCost or 0), (x1 + x2) * 0.5, y1 + S.px(4), 11, S.game.resources[1].color, "c")
-
-		local n = queued[defID]
-		if n and n > 0 then
-			local label = tostring(n)
-			local bw = max(S.px(16), S.TextWidth(label, 11) + S.px(6))
-			S.Rect(x2 - bw - 2, y2 - S.px(16) - 2, x2 - 2, y2 - 2, t.warn, S.px(3))
-			S.Text(label, x2 - 2 - bw * 0.5, y2 - S.px(13), 11, { 0.08, 0.08, 0.07, 1 }, "c")
-		end
-
+		local last = (i % cols == 0) and " last" or ""
+		parts[#parts + 1] = string.format('<div id="b%d" class="card tile%s" data-b="%d" style="width: %ddp; height: %ddp;">', i, last, i, w, h)
+		parts[#parts + 1] = hud.UnitPictureRML(defID, "pic")
+		parts[#parts + 1] = string.format('<div class="cost">%s</div>', hud.Cost(ud.metalCost or 0))
 		if cmd.slateKey then
-			local kw = S.TextWidth(cmd.slateKey, 11) + S.px(6)
-			S.Rect(x1 + 1, y2 - S.px(15), x1 + 1 + kw, y2 - 1, { 0, 0, 0, 0.60 }, 0)
-			S.Text(cmd.slateKey, x1 + 1 + kw * 0.5, y2 - S.px(12), 11, t.text, "c")
+			parts[#parts + 1] = string.format('<div class="key">%s</div>', hud.Escape(cmd.slateKey))
 		end
-
-		AddHit(x1, y1, x2, y2, "build", cmd)
-		if over then hoverDef = defID ; hoverBuildCmd = cmd end
+		parts[#parts + 1] = string.format('<div id="b%d-q" class="queue hidden"/>', i)
+		parts[#parts + 1] = '</div>'
 	end
-	return hoverDef
+	local signature = concat(parts)
+	if signature ~= shownGrid then
+		shownGrid = signature
+		view.Element("grid").inner_rml = signature
+		view.Forget()
+		hovered = nil
+	end
+	view.SetText("builder", hud.Escape(builderName))
+	view.SetClass("pager", "hidden", pageCount <= 1)
+	view.SetText("pageno", page .. " / " .. pageCount)
+	view.SetClass("prev", "off", page <= 1)
+	view.SetClass("next", "off", page >= pageCount)
 end
 
-local function DrawOrderPanel(mx, my, activeID)
-	local t = S.theme
-	S.Panel(ox1, oy1, ox2, oy2)
-	S.Blur(ORDER_ID, ox1, oy1, ox2, oy2)
-
-	local pad, gap = S.px(PAD), S.px(GAP)
-	local ix1, ix2 = ox1 + pad, ox2 - pad
-	local y = oy2 - pad
-	local hh = S.px(ORDER_HEADER_H)
-	S.Text("ORDERS", ix1, y - hh * 0.5, 12, t.accent, "v")
-	y = y - hh - gap
-
+local function ShowOrders()
 	local oCols = S.game.orderColumns or 5
 	local sCols = S.game.stateColumns or 4
-	local oRows = ceil(#orders / oCols)
-	local sRows = ceil(#states / sCols)
-	if oRows + sRows == 0 then return nil end
+	local inner = PANEL_WIDTH - PAD * 2
+	local ow = floor((inner - GAP * (oCols - 1)) / oCols)
+	local sw = floor((inner - GAP * (sCols - 1)) / sCols)
 
-	-- Rows share the height that is left; state rows are a little taller.
-	local avail = (y - (oy1 + pad)) - gap * (oRows + sRows - 1)
-	local unit = avail / (oRows + sRows * 1.15)
-	local oh = min(S.px(44), unit)
-	local sh = min(S.px(50), unit * 1.15)
-	local hoverCmd
-
-	local ow = ((ix2 - ix1) - gap * (oCols - 1)) / oCols
+	local parts = {}
 	for i = 1, #orders do
 		local cmd = orders[i]
-		local col = (i - 1) % oCols
-		local row = floor((i - 1) / oCols)
-		local x1 = floor(ix1 + col * (ow + gap))
-		local x2 = floor(x1 + ow)
-		local y2 = floor(y - row * (oh + gap))
-		local y1 = floor(y2 - oh)
-		local over = Hovered(x1, y1, x2, y2, mx, my)
-		local state = (cmd.id == activeID) and "active" or ((over and not cmd.disabled) and "hover" or nil)
-		S.Button(x1, y1, x2, y2, state)
+		local last = (i % oCols == 0) and " last" or ""
+		parts[#parts + 1] = string.format('<div id="o%d" class="order tile%s%s" data-o="%d" style="width: %ddp;">', i, last, cmd.disabled and " disabled" or "", i, ow)
 		if cmd.slateLabel ~= "" then
-			S.Text(S.Fit(cmd.slateLabel, 12.5, ow - S.px(4)), (x1 + x2) * 0.5, y1 + oh * 0.36, 12.5, cmd.disabled and t.textDim or t.text, "cv")
+			parts[#parts + 1] = string.format('<div class="cap">%s</div>', hud.Escape(cmd.slateLabel))
 		elseif cmd.texture and cmd.texture ~= "" then
-			local inset = S.px(6)
-			S.Icon(x1 + inset, y1 + inset, x2 - inset, y2 - inset, cmd.texture)
+			parts[#parts + 1] = string.format('<img class="oicon" src="/%s"/>', cmd.texture)
 		end
-		if cmd.slateKey and oh >= S.px(34) then
-			S.Text(cmd.slateKey, x1 + S.px(4), y2 - S.px(12), 10, t.textDim)
+		if cmd.slateKey then
+			parts[#parts + 1] = string.format('<div class="okey">%s</div>', hud.Escape(cmd.slateKey))
 		end
-		AddHit(x1, y1, x2, y2, "order", cmd)
-		if over then hoverCmd = cmd end
+		parts[#parts + 1] = '</div>'
 	end
-	if oRows > 0 then y = y - oRows * (oh + gap) end
+	local signature = concat(parts)
+	if signature ~= shownOrders then
+		shownOrders = signature
+		view.Element("order-grid").inner_rml = signature
+		view.Forget()
+		hovered = nil
+	end
 
-	local sw = ((ix2 - ix1) - gap * (sCols - 1)) / sCols
+	parts = {}
 	for i = 1, #states do
 		local cmd = states[i]
-		local col = (i - 1) % sCols
-		local row = floor((i - 1) / sCols)
-		local x1 = floor(ix1 + col * (sw + gap))
-		local x2 = floor(x1 + sw)
-		local y2 = floor(y - row * (sh + gap))
-		local y1 = floor(y2 - sh)
-		local over = Hovered(x1, y1, x2, y2, mx, my)
-		S.Button(x1, y1, x2, y2, (over and not cmd.disabled) and "hover" or nil)
-
 		local cur = tonumber(cmd.params[1]) or 0
 		local count = #cmd.params - 1
 		local label = CleanName(cmd.params[cur + 2] or cmd.name)
-		S.Text(S.Fit(label, 12, sw - S.px(4)), (x1 + x2) * 0.5, y1 + sh * 0.62, 12, t.text, "cv")
-
 		-- pips: how far along the options this state is (on/off shows one pip)
 		local pips = (count == 2) and 1 or count
 		local lit = (count == 2) and cur or (cur + 1)
-		local ph, pg = max(2, S.px(4)), S.px(3)
-		local pw = min(S.px(14), floor((sw - S.px(10) - (pips - 1) * pg) / pips))
-		local total = pips * pw + (pips - 1) * pg
-		local px = floor((x1 + x2) * 0.5 - total * 0.5)
-		local py = y1 + floor(sh * 0.18)
+		local pipW = min(14, floor((sw - 10 - (pips - 1) * 2) / max(1, pips)))
+		local last = (i % sCols == 0) and " last" or ""
+		parts[#parts + 1] = string.format('<div id="s%d" class="state tile%s%s" data-s="%d" style="width: %ddp;">', i, last, cmd.disabled and " disabled" or "", i, sw)
+		parts[#parts + 1] = string.format('<div class="cap">%s</div><div class="pips">', hud.Escape(label))
 		for p = 1, pips do
-			S.Rect(px, py, px + pw, py + ph, (p <= lit) and t.accent or t.track, ph * 0.5)
-			px = px + pw + pg
+			parts[#parts + 1] = string.format('<div class="pip%s" style="width: %ddp;"/>', (p <= lit) and " lit" or "", pipW)
 		end
-		AddHit(x1, y1, x2, y2, "state", cmd)
-		if over then hoverCmd = cmd end
+		parts[#parts + 1] = '</div></div>'
 	end
-	return hoverCmd
+	signature = concat(parts)
+	if signature ~= shownStates then
+		shownStates = signature
+		view.Element("state-grid").inner_rml = signature
+		view.Forget()
+		hovered = nil
+	end
+
+	-- the panel is as tall as its rows need
+	local oRows, sRows = ceil(#orders / oCols), ceil(#states / sCols)
+	local h = PAD * 2 + ORDER_HEAD_H + GAP + oRows * (ORDER_H + GAP) + sRows * (STATE_H + GAP)
+	return max(ORDER_MIN_H, h)
 end
 
-local cache
-local lastHoverKey
-
--- Which hit rectangle is under the mouse (0 for none). The rectangles belong
--- to the current recording, so this is also what decides when to redo it.
-local function HitIndexAt(mx, my)
-	for i = #hits, 1, -1 do
-		local h = hits[i]
-		if mx >= h.x1 and mx <= h.x2 and my >= h.y1 and my <= h.y2 then return i end
-	end
-	return 0
-end
-
-function widget:DrawScreen()
-	if WG.Slate ~= S or not bx1 then return end
-	if dirty then
-		Refresh()
-		RefreshQueue()
-		refreshCount = refreshCount + 1
-	end
-
-	local mx, my = spGetMouseState()
-	local _, activeID = spGetActiveCommand()
-	local showBuild = #builds > 0
-	local showOrder = (#orders + #states) > 0
-	if not showBuild then S.Unblur(BUILD_ID) end
-	if not showOrder then S.Unblur(ORDER_ID) end
-
-	-- The menus are the most expensive thing Slate draws, so they are recorded
-	-- and only redone when the commands, the page or filter, the active
-	-- command, the factory queue or the button under the mouse changes.
-	local key = table.concat({
-		S.version, refreshCount, page, filter and filter.label or "", activeID or 0,
-		HitIndexAt(mx, my), queueSignature, bx1, by1, ox1, oy1,
-	}, ":")
-	cache = S.Cached(cache, key, function()
-		hits = {}
-		if showBuild then DrawBuildPanel(mx, my, activeID) end
-		if showOrder then DrawOrderPanel(mx, my, activeID) end
-	end)
-
-	-- Tell the selection panel what the mouse is over, and the key bindings
-	-- widget which button a Ctrl+Insert / Ctrl+Delete would apply to. Only
-	-- when it changes, so the selection panel can keep its own recording.
-	local h = hits[HitIndexAt(mx, my)]
-	local cmd = h and (h.kind == "build" or h.kind == "order" or h.kind == "state") and h.data or nil
-	local hoverKey = cmd and (h.kind .. ":" .. tostring(cmd.id)) or nil
-	if hoverKey ~= lastHoverKey then
-		lastHoverKey = hoverKey
-		if cmd and h.kind == "build" then
-			local ud = UnitDefs[-cmd.id]
-			S.hover = { unitDefID = -cmd.id } ; myHover = true
-			S.hoverAction = (cmd.action and cmd.action ~= "") and
-				{ action = cmd.action, label = ud.translatedHumanName or ud.humanName or ud.name } or nil
-		elseif cmd then
-			S.hover = { title = CleanName(cmd.name), text = cmd.tooltip } ; myHover = true
-			S.hoverAction = (cmd.action and cmd.action ~= "") and
-				{ action = cmd.action, label = CleanName(cmd.name) } or nil
-		elseif myHover then
-			S.hover = nil ; S.hoverAction = nil ; myHover = false
+-- everything about a tile that changes without the list changing
+local function RefreshTiles()
+	for i = 1, #pageCards do
+		local cmd = pageCards[i]
+		local n = queued[-cmd.id] or 0
+		local id = "b" .. i
+		if n > 0 then
+			view.SetText(id .. "-q", tostring(n))
 		end
+		view.SetClass(id .. "-q", "hidden", n <= 0)
+		view.SetClass(id, "disabled", cmd.disabled and true or false)
+		view.SetClass(id, "active", cmd.id == activeCmdID)
 	end
-
-	S.Flush()
+	for i = 1, #orders do
+		view.SetClass("o" .. i, "active", orders[i].id == activeCmdID)
+	end
+	view.SetClass("build", "hidden", not showBuild)
+	view.SetClass("orders", "hidden", not showOrders)
 end
 
 --------------------------------------------------------------------------------
--- Mouse
+-- Placement
 --------------------------------------------------------------------------------
 
-local function OverPanels(mx, my)
-	if #builds > 0 and S.Inside(mx, my, bx1, by1, bx2, by2) then return "build" end
-	if #orders + #states > 0 and S.Inside(mx, my, ox1, oy1, ox2, oy2) then return "order" end
-	return nil
+local Place
+
+local function OrderOrigin(vsx, vsy, w, h, scale)
+	return hud.Margin() * scale, hud.Margin() * scale
 end
 
-local function HitAt(mx, my)
-	for i = #hits, 1, -1 do
-		local h = hits[i]
-		if mx >= h.x1 and mx <= h.x2 and my >= h.y1 and my <= h.y2 then return h end
+-- the build menu stands on the orders menu and follows it if it is moved, so
+-- it stays put whatever shape the minimap takes
+local function BuildOrigin(vsx, vsy, w, h, scale)
+	if orderRect then
+		return orderRect[1], orderRect[4] + hud.Gap() * scale
 	end
+	return hud.Margin() * scale, (hud.Margin() + ORDER_MIN_H + hud.Gap()) * scale
+end
+
+Place = function()
+	local ordersEl = view.Element("orders")
+	ordersEl.style["height"] = orderHeight .. "dp"
+	local x, y, w, h = hud.PlacePanel(ordersEl, LAYOUT_ORDER, PANEL_WIDTH, orderHeight, OrderOrigin)
+	orderRect = x and { x, y, x + w, y + h }
+	x, y, w, h = hud.PlacePanel(view.Element("build"), LAYOUT_BUILD, PANEL_WIDTH, BUILD_HEIGHT, BuildOrigin)
+	buildRect = x and { x, y, x + w, y + h }
+end
+
+local function InRect(rect, x, y)
+	return rect and x >= rect[1] and x <= rect[3] and y >= rect[2] and y <= rect[4]
+end
+
+--------------------------------------------------------------------------------
+-- Rebuilding
+--------------------------------------------------------------------------------
+
+local function Rebuild()
+	Refresh()
+	RefreshQueue()
+	ShowChips()
+	ShowGrid()
+	local h = ShowOrders()
+	if h ~= orderHeight then
+		orderHeight = h
+		Place()
+	end
+	RefreshTiles()
+end
+
+--------------------------------------------------------------------------------
+-- Hover and clicks
+--------------------------------------------------------------------------------
+
+local function SetHover(kind, cmd)
+	if cmd and kind == "build" then
+		local ud = UnitDefs[-cmd.id]
+		S.hover = { unitDefID = -cmd.id }
+		S.hoverAction = (cmd.action and cmd.action ~= "") and { action = cmd.action, label = hud.UnitName(ud) } or nil
+	elseif cmd then
+		S.hover = { title = CleanName(cmd.name), text = cmd.tooltip }
+		S.hoverAction = (cmd.action and cmd.action ~= "") and { action = cmd.action, label = CleanName(cmd.name) } or nil
+	elseif hovered then
+		S.hover = nil
+		S.hoverAction = nil
+	end
+	hovered = cmd and { kind = kind, cmd = cmd } or nil
 end
 
 local function Apply(cmd, button)
@@ -551,51 +449,189 @@ local function Apply(cmd, button)
 	spSetActiveCommand(index, button, button == 1, button == 3, alt, ctrl, meta, shift)
 end
 
-function widget:IsAbove(mx, my)
-	if WG.Slate ~= S or not bx1 then return false end
-	return OverPanels(mx, my) ~= nil
+-- RmlUi numbers the buttons left 0, right 1, middle 2; the engine 1, 3, 2
+local ENGINE_BUTTON = { [0] = 1, [1] = 3, [2] = 2 }
+
+local function Listen(containerId, attribute, kind, list)
+	local container = view.Element(containerId)
+	if not container then return end
+	container:AddEventListener("mousedown", function(event)
+		local index = hud.EventAttribute(event, attribute)
+		local cmd = index and list()[index]
+		local button = ENGINE_BUTTON[event.parameters and event.parameters.button]
+		if not cmd or not button then return end
+		-- a click while the hotbind prompt is up cancels the prompt and does
+		-- nothing else, so a mis-triggered capture never eats a build order
+		local hotbind = WG.SlateHotbind
+		if hotbind and hotbind.IsCapturing and hotbind.IsCapturing() then
+			hotbind.Cancel()
+			return
+		end
+		if cmd.disabled then return end
+		hud.Sound("click")
+		Apply(cmd, button)
+		dirty = true
+	end)
+	container:AddEventListener("mouseover", function(event)
+		local index = hud.EventAttribute(event, attribute)
+		local cmd = index and list()[index]
+		if cmd then
+			if not hovered or hovered.cmd ~= cmd then
+				hud.Sound("hover")
+			end
+			SetHover(kind, cmd)
+		else
+			SetHover(kind, nil)
+		end
+	end)
+	container:AddEventListener("mouseout", function()
+		SetHover(kind, nil)
+	end)
 end
 
-function widget:GetTooltip(mx, my)
-	local h = HitAt(mx, my)
-	if h and h.data and h.data.tooltip then return h.data.tooltip end
-	return ""
+local function TurnPage(delta)
+	local p = min(pageCount, max(1, page + delta))
+	if p ~= page then
+		page = p
+		dirty = true
+	end
 end
 
-function widget:MousePress(mx, my, button)
-	if WG.Slate ~= S or not bx1 then return false end
-	if not OverPanels(mx, my) then return false end
-	pressed = HitAt(mx, my)
-	return true
-end
+--------------------------------------------------------------------------------
+-- Widget callins
+--------------------------------------------------------------------------------
 
-function widget:MouseRelease(mx, my, button)
-	local h = HitAt(mx, my)
-	local was = pressed
-	pressed = nil
-	if not (h and was) or h.kind ~= was.kind or h.data ~= was.data then return true end
+function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget(self)
+		return
+	end
+	local helpers = include("slate/rml/core.lua")
+	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		Spring.Echo("[Slate Build Menu] " .. tostring(reason))
+		widgetHandler:RemoveWidget(self)
+		return
+	end
+	hud = helpers
+	document = result
+	view = hud.NewView(document)
+	view.Assume("build", "hidden", true) -- set in the markup
+	view.Assume("orders", "hidden", true)
+	view.Assume("chips", "hidden", true)
+	view.Assume("pager", "hidden", true)
 
-	if h.kind == "build" or h.kind == "order" or h.kind == "state" then
-		if not h.data.disabled then
-			Apply(h.data, button)
+	Listen("grid", "data-b", "build", function() return pageCards end)
+	Listen("order-grid", "data-o", "order", function() return orders end)
+	Listen("state-grid", "data-s", "state", function() return states end)
+
+	local chipsEl = view.Element("chips")
+	chipsEl:AddEventListener("mousedown", function(event)
+		if event.parameters and event.parameters.button ~= 0 then return end
+		local index = hud.EventAttribute(event, "data-c")
+		local chip = index and chips[index]
+		if chip then
+			hud.Sound("click")
+			filter = chip.cat
+			page = 1
 			dirty = true
 		end
-	elseif h.kind == "chip" then
-		filter = h.data.cat
-		page = 1
-		dirty = true
-	elseif h.kind == "next" then
-		page = min(pageCount, page + 1)
-	elseif h.kind == "prev" then
-		page = max(1, page - 1)
-	end
-	return true
+	end)
+	hud.OnClick(view, "prev", function() hud.Sound("click") ; TurnPage(-1) end)
+	hud.OnClick(view, "next", function() hud.Sound("click") ; TurnPage(1) end)
+	view.Element("build"):AddEventListener("mousescroll", function(event)
+		local delta = event.parameters and (event.parameters.wheel_delta_y or event.parameters.wheel_delta)
+		if delta and delta ~= 0 then
+			TurnPage((delta > 0) and 1 or -1)
+		end
+	end)
+
+	WG.SlateCommands = {
+		-- the command under the mouse and whether it is disabled, or nil
+		GetHovered = function()
+			local cmd = hovered and hovered.cmd
+			if not cmd then return nil end
+			local visible = (hovered.kind == "build" and showBuild) or (hovered.kind ~= "build" and showOrders)
+			if not visible then return nil end
+			return cmd, (cmd.disabled and true or false)
+		end,
+		-- the panels' rectangles in screen pixels (y up)
+		GetOrderRect = function()
+			if orderRect then return orderRect[1], orderRect[2], orderRect[3], orderRect[4] end
+		end,
+		GetBuildRect = function()
+			if buildRect then return buildRect[1], buildRect[2], buildRect[3], buildRect[4] end
+		end,
+		-- nil while the mouse is off both panels; otherwise the tooltip of the
+		-- command under it, or "" between the buttons
+		GetTooltip = function()
+			if not document or Spring.IsGUIHidden() then return nil end
+			local mx, my = spGetMouseState()
+			if not ((showOrders and InRect(orderRect, mx, my)) or (showBuild and InRect(buildRect, mx, my))) then
+				return nil
+			end
+			local cmd = hovered and hovered.cmd
+			return cmd and (cmd.tooltip or "") or ""
+		end,
+	}
+
+	hud.RegisterPanel(LAYOUT_ORDER, "Orders", Place)
+	hud.RegisterPanel(LAYOUT_BUILD, "Build menu", Place)
+	hud.OnChange(LAYOUT_BUILD, function() Place() ; dirty = true end)
+	Place()
+
+	HideEngineMenu()
+	Rebuild()
+	hud.ShowPassive(document)
 end
 
-function widget:MouseWheel(up)
-	if WG.Slate ~= S or not bx1 or pageCount <= 1 or #builds == 0 then return false end
-	local mx, my = spGetMouseState()
-	if not S.Inside(mx, my, bx1, by1, bx2, by2) then return false end
-	if up then page = max(1, page - 1) else page = min(pageCount, page + 1) end
-	return true
+function widget:Shutdown()
+	widgetHandler:ConfigLayoutHandler(true)
+	spForceLayoutUpdate()
+	WG.SlateCommands = nil
+	if S and hovered then
+		S.hover = nil
+		S.hoverAction = nil
+	end
+	if hud then
+		hud.UnregisterPanel(LAYOUT_ORDER)
+		hud.UnregisterPanel(LAYOUT_BUILD)
+		hud.OffChange(LAYOUT_BUILD)
+		hud.CloseDocument(document)
+		document = nil
+	end
+end
+
+function widget:ViewResize()
+	if hud and document then
+		hud.UpdateScale()
+		Place()
+	end
+end
+
+function widget:CommandsChanged()  dirty = true end
+function widget:SelectionChanged() dirty = true end
+
+function widget:Update(dt)
+	if not document then return end
+	if hud.FollowGuiHidden(document) then
+		SetHover(nil, nil)
+		return -- hidden with the rest of the GUI (F5)
+	end
+	local _, cmdID = spGetActiveCommand()
+	queueTimer = queueTimer + dt
+	if dirty then
+		activeCmdID = cmdID
+		queueTimer = 0
+		Rebuild()
+	elseif queueTimer > QUEUE_INTERVAL then
+		queueTimer = 0
+		activeCmdID = cmdID
+		RefreshQueue()
+		RefreshTiles()
+	elseif cmdID ~= activeCmdID then
+		activeCmdID = cmdID
+		RefreshTiles()
+	end
 end

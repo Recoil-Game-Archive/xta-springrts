@@ -9,7 +9,7 @@ function widget:GetInfo()
 		date      = "Dec, 2013",
 		license   = "GNU GPL v2",
 		layer     = 0,
-		enabled   = true
+		enabled   = false, -- replaced by Slate (luaui/slate/); switch back on if Slate is removed
 	}
 end
 

@@ -1,91 +1,69 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Selection Panel",
 		desc    = "Shows the selected unit or group, the unit under the cursor, or what a build or order button does. Replaces the engine tooltip.",
 		author  = "Scary le Poo",
-		date    = "2026-10-08",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = 2,
 		enabled = true,
 	}
 end
 
-local ID = "selection"
-local WIDTH, HEIGHT = 760, 128      -- design pixels
-local PAD = 12
-local MAX_GROUP_ICONS = 12
+--------------------------------------------------------------------------------
+--  One panel at the bottom centre, shown only when there is something to
+--  say, in this order of preference: the build tile or order button under the
+--  mouse (from WG.Slate.hover), a hint from another Slate panel
+--  (WG.Slate.TipAt), the selection (one unit with its live health, income and
+--  stats from slate_game.lua, or a group as a row of type icons with counts),
+--  or else the unit or wreck under the cursor.
+--
+--  In the group view a type icon is a button: left click keeps only that
+--  type selected, Alt + click a single unit of it, Ctrl + click every unit of
+--  that type you own (Shift adds them instead).
+--------------------------------------------------------------------------------
+
+local DOCUMENT_PATH = "selection.rml"
+local UPDATE_INTERVAL = 0.15
+local MAX_GROUP_ICONS = 9
+
+-- must match #selection in selection.rml
+local WIDTH, HEIGHT = 760, 128
+local LAYOUT_NAME = "slate_selection"
 
 local spGetSelectedUnits       = Spring.GetSelectedUnits
 local spGetSelectedUnitsCounts = Spring.GetSelectedUnitsCounts
+local spGetSelectedUnitsSorted = Spring.GetSelectedUnitsSorted
 local spGetUnitDefID           = Spring.GetUnitDefID
 local spGetUnitHealth          = Spring.GetUnitHealth
 local spGetUnitResources       = Spring.GetUnitResources
 local spGetMouseState          = Spring.GetMouseState
 local spTraceScreenRay         = Spring.TraceScreenRay
 local spGetCurrentTooltip      = Spring.GetCurrentTooltip
-local spIsGUIHidden            = Spring.IsGUIHidden
-local floor = math.floor
-local min, max = math.min, math.max
+local spGetTeamUnitsByDefs     = Spring.GetTeamUnitsByDefs
+local spGetMyTeamID            = Spring.GetMyTeamID
+local spSelectUnitArray        = Spring.SelectUnitArray
+local spGetModKeyState         = Spring.GetModKeyState
 
-local S
-local x1, y1, x2, y2
-local wrapCache = {}
-local wrapCount = 0
+local min, max, floor = math.min, math.max, math.floor
+local format = string.format
 
--- What to show, decided a few times a second (not every frame).
-local view = nil
-local viewVersion = 0
-local cache
-local timer = 1
-
---------------------------------------------------------------------------------
-
-local function Layout()
-	x1, y1, x2, y2 = S.Box(ID, "c", "b", 0, S.theme.margin, WIDTH, HEIGHT)
-	wrapCache, wrapCount = {}, 0
-end
-
-local function UnitName(ud)
-	return ud.translatedHumanName or ud.humanName or ud.name or "?"
-end
-
-local function UnitBlurb(ud)
-	return ud.translatedTooltip or ud.tooltip or ""
-end
-
--- Break text into at most `maxLines` lines no wider than `width` pixels.
-local function Wrap(text, size, width, maxLines)
-	local key = size .. "|" .. floor(width) .. "|" .. maxLines .. "|" .. text
-	local hit = wrapCache[key]
-	if hit then return hit end
-
-	local lines = {}
-	for paragraph in (text .. "\n"):gmatch("(.-)\r?\n") do
-		local line = ""
-		for word in paragraph:gmatch("%S+") do
-			local try = (line == "") and word or (line .. " " .. word)
-			if line ~= "" and S.TextWidth(try, size) > width then
-				lines[#lines + 1] = line
-				line = word
-			else
-				line = try
-			end
-		end
-		if line ~= "" then lines[#lines + 1] = line end
-	end
-	while #lines > maxLines do lines[#lines] = nil end
-
-	if wrapCount > 200 then wrapCache, wrapCount = {}, 0 end
-	wrapCache[key] = lines
-	wrapCount = wrapCount + 1
-	return lines
-end
+local hud, S
+local document
+local view
+local SetText, SetClass, SetStyle
+local lastUpdate
+local lastHover
+local shown                 -- the view currently on screen: "unit", "group", "text" or nil
+local shownCells, shownTypes -- what the dynamic markup was made from
+local groupTypes = {}       -- { defID =, count = } shown as icons; icon i has data-t="i"
 
 --------------------------------------------------------------------------------
--- Deciding what to show
+-- deciding what to show
 --------------------------------------------------------------------------------
 
 local function StatCells(ud, res)
@@ -107,7 +85,7 @@ local function UnitView(unitID, defID)
 	local mm, mu, em, eu = spGetUnitResources(unitID)
 	local res = mm and { mm, mu or 0, em or 0, eu or 0 } or nil
 	return {
-		kind = "unit", defID = defID, title = UnitName(ud), blurb = UnitBlurb(ud),
+		kind = "unit", defID = defID, title = hud.UnitName(ud), blurb = hud.UnitBlurb(ud),
 		health = health, maxHealth = maxHealth,
 		cells = StatCells(ud, res),
 	}
@@ -118,8 +96,8 @@ local function Decide()
 	if hover and hover.unitDefID and UnitDefs[hover.unitDefID] then
 		local ud = UnitDefs[hover.unitDefID]
 		local cells = StatCells(ud, nil)
-		cells[#cells + 1] = { label = "Build time", value = S.Number(ud.buildTime or 0) }
-		return { kind = "unit", defID = hover.unitDefID, title = UnitName(ud), blurb = UnitBlurb(ud), cells = cells }
+		cells[#cells + 1] = { label = "Build time", value = hud.Number(ud.buildTime or 0) }
+		return { kind = "unit", defID = hover.unitDefID, title = hud.UnitName(ud), blurb = hud.UnitBlurb(ud), cells = cells }
 	elseif hover and (hover.title or hover.text) then
 		return { kind = "text", title = hover.title or "", text = hover.text or "" }
 	end
@@ -171,6 +149,127 @@ local function Decide()
 end
 
 --------------------------------------------------------------------------------
+-- showing it
+--------------------------------------------------------------------------------
+
+local function Percent(fraction)
+	fraction = max(0, min(1, fraction or 0))
+	return format("%.1f%%", floor(fraction * 200 + 0.5) / 2)
+end
+
+local function ShowView(kind)
+	if shown ~= kind then
+		shown = kind
+		SetClass("unit", "hidden", kind ~= "unit")
+		SetClass("group", "hidden", kind ~= "group")
+		SetClass("text", "hidden", kind ~= "text")
+		SetClass("selection", "hidden", kind == nil)
+	end
+end
+
+local function ShowUnit(v)
+	local picEl = view.Element("unit-pic")
+	local pic = hud.UnitPictureRML(v.defID, "pic")
+	if picEl and view.lastPic ~= pic then
+		view.lastPic = pic
+		picEl.inner_rml = pic
+	end
+	SetText("unit-name", hud.Escape(v.title))
+	SetText("unit-blurb", hud.Escape(v.blurb))
+	local live = v.health and v.maxHealth
+	SetClass("unit-health", "hidden", not live)
+	if live then
+		SetStyle("unit-fill", "width", Percent(v.maxHealth > 0 and v.health / v.maxHealth or 0))
+		SetText("unit-hp", hud.Number(v.health) .. " / " .. hud.Number(v.maxHealth))
+	end
+	local parts = {}
+	for i = 1, min(#v.cells, 6) do
+		local c = v.cells[i]
+		parts[i] = format('<div class="cell"><div class="label">%s</div><div class="figure">%s</div></div>',
+			hud.Escape(c.label), hud.Escape(c.value))
+	end
+	local cells = table.concat(parts)
+	if cells ~= shownCells then
+		shownCells = cells
+		view.Element("unit-cells").inner_rml = cells
+	end
+end
+
+local function ShowGroup(v)
+	SetText("group-name", v.total .. " units selected")
+	SetClass("group-health", "hidden", v.maxHealth <= 0)
+	if v.maxHealth > 0 then
+		SetStyle("group-fill", "width", Percent(v.health / v.maxHealth))
+		SetText("group-hp", hud.Number(v.health) .. " / " .. hud.Number(v.maxHealth))
+	end
+	groupTypes = v.types
+	local parts = {}
+	for i = 1, min(#v.types, MAX_GROUP_ICONS) do
+		local e = v.types[i]
+		parts[#parts + 1] = format('<div class="type" data-t="%d">%s<div class="count">%d</div></div>',
+			i, hud.UnitPictureRML(e.defID, "pic"), e.count)
+	end
+	local types = table.concat(parts)
+	if types ~= shownTypes then
+		shownTypes = types
+		view.Element("types").inner_rml = types
+	end
+end
+
+local function ShowText(v)
+	SetText("text-title", hud.Escape(v.title))
+	SetText("text-body", (hud.Escape(v.text):gsub("\r?\n", "<br/>")))
+end
+
+local function Refresh()
+	local v = Decide()
+	if not v then
+		ShowView(nil)
+		return
+	end
+	ShowView(v.kind)
+	if v.kind == "unit" then ShowUnit(v)
+	elseif v.kind == "group" then ShowGroup(v)
+	else ShowText(v) end
+end
+
+--------------------------------------------------------------------------------
+-- group icons: select by type
+--------------------------------------------------------------------------------
+
+local function OnTypeClick(event)
+	if event.parameters and event.parameters.button ~= 0 then return end
+	local index = hud.EventAttribute(event, "data-t")
+	local e = index and groupTypes[index]
+	if not e then return end
+	local alt, ctrl, _, shift = spGetModKeyState()
+	local units
+	if ctrl then
+		units = spGetTeamUnitsByDefs(spGetMyTeamID(), e.defID) or {}
+	else
+		local sorted = spGetSelectedUnitsSorted() or {}
+		units = sorted[e.defID] or {}
+		if alt and units[1] then units = { units[1] } end
+	end
+	hud.Sound("click")
+	spSelectUnitArray(units, shift and ctrl)
+end
+
+--------------------------------------------------------------------------------
+-- placement
+--------------------------------------------------------------------------------
+
+local function DefaultOrigin(vsx, vsy, w, h, scale)
+	return (vsx - w) * 0.5, hud.Margin() * scale
+end
+
+local function Place()
+	hud.PlacePanel(view.Element("selection"), LAYOUT_NAME, WIDTH, HEIGHT, DefaultOrigin)
+end
+
+--------------------------------------------------------------------------------
+-- widget api
+--------------------------------------------------------------------------------
 
 function widget:Initialize()
 	S = WG.Slate
@@ -178,153 +277,61 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 		return
 	end
+	local helpers = include("slate/rml/core.lua")
+	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		Spring.Echo("[Slate Selection] " .. tostring(reason))
+		widgetHandler:RemoveWidget()
+		return
+	end
+	hud = helpers
+	document = result
+	view = hud.NewView(document)
+	SetText, SetClass, SetStyle = view.SetText, view.SetClass, view.SetStyle
+	view.Assume("selection", "hidden", true)
+	view.Assume("unit", "hidden", true)
+	view.Assume("group", "hidden", true)
+	view.Assume("text", "hidden", true)
+
+	view.Element("types"):AddEventListener("mousedown", OnTypeClick)
+
 	Spring.SendCommands("tooltip 0")
 	if Spring.SetDrawSelectionInfo then Spring.SetDrawSelectionInfo(false) end
-	S.Register(ID, "Selection", Layout)
-	S.OnChange(ID, Layout)
-	Layout()
+
+	hud.RegisterPanel(LAYOUT_NAME, "Selection", Place, function() return shown ~= nil end)
+	hud.OnChange(LAYOUT_NAME, Place)
+	Place()
+	Refresh()
+	hud.ShowPassive(document)
+	lastUpdate = Spring.GetTimer()
 end
 
 function widget:Shutdown()
 	Spring.SendCommands("tooltip 1")
 	if Spring.SetDrawSelectionInfo then Spring.SetDrawSelectionInfo(true) end
-	if S then
-		S.Unregister(ID)
-		S.OffChange(ID)
-		S.Unblur(ID)
+	if hud then
+		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
+		document = nil
 	end
 end
 
 function widget:ViewResize()
-	if S and WG.Slate == S then Layout() end
-end
-
-function widget:Update(dt)
-	timer = timer + dt
-end
-
---------------------------------------------------------------------------------
--- Drawing
---------------------------------------------------------------------------------
-
-local function DrawCells(cells, cx1, cx2, baseY)
-	local t = S.theme
-	local n = min(#cells, 6)
-	if n == 0 then return end
-	local w = (cx2 - cx1) / max(n, 5)
-	for i = 1, n do
-		local x = cx1 + (i - 1) * w
-		S.Text(cells[i].label:upper(), x, baseY + S.px(19), 11, t.textDim)
-		S.Text(cells[i].value, x, baseY, 15, t.text)
+	if hud and document then
+		hud.UpdateScale()
+		Place()
 	end
 end
 
-local function DrawHealth(cx1, cx2, y, health, maxHealth)
-	local t = S.theme
-	local label = S.Number(health) .. " / " .. S.Number(maxHealth)
-	local lw = S.TextWidth(label, 14) + S.px(10)
-	local bh = S.px(8)
-	S.Bar(cx1, y, cx2 - lw, y + bh, (maxHealth > 0) and (health / maxHealth) or 0, t.good)
-	S.Text(label, cx2, y - S.px(2), 14, t.text, "r")
-end
-
-local function DrawUnit(v)
-	local t = S.theme
-	local pad = S.px(PAD)
-	local pic = (y2 - y1) - pad * 2
-	local px1, py1 = x1 + pad, y1 + pad
-	local picture = S.game.unitPicture
-	S.Icon(px1, py1, px1 + pic, py1 + pic, picture and picture(v.defID) or ("#" .. v.defID))
-	S.Outline(px1, py1, px1 + pic, py1 + pic, t.buttonBorder, S.px(t.buttonRadius), 1)
-
-	local cx1, cx2 = px1 + pic + S.px(14), x2 - pad
-	local ty = y2 - pad - S.px(18)
-	S.Text(v.title, cx1, ty, 20, t.text)
-	local tw = S.TextWidth(v.title, 20) + S.px(12)
-	S.Text(S.Fit(v.blurb, 14, cx2 - cx1 - tw), cx1 + tw, ty, 14, t.textDim)
-
-	if v.health and v.maxHealth then
-		DrawHealth(cx1, cx2, ty - S.px(22), v.health, v.maxHealth)
+function widget:Update()
+	if not document then return end
+	if hud.FollowGuiHidden(document) then return end
+	-- hover changes should feel instant; everything else can wait a moment
+	local now = Spring.GetTimer()
+	if S.hover ~= lastHover or Spring.DiffTimers(now, lastUpdate) >= UPDATE_INTERVAL then
+		lastHover = S.hover
+		lastUpdate = now
+		Refresh()
 	end
-	DrawCells(v.cells, cx1, cx2, y1 + pad + S.px(4))
-end
-
-local function DrawGroup(v)
-	local t = S.theme
-	local pad = S.px(PAD)
-	local cx1, cx2 = x1 + pad, x2 - pad
-	local ty = y2 - pad - S.px(18)
-	S.Text(v.total .. " units selected", cx1, ty, 20, t.text)
-	if v.maxHealth > 0 then
-		local tw = S.TextWidth(v.total .. " units selected", 20) + S.px(20)
-		DrawHealth(cx1 + tw, cx2, ty + S.px(4), v.health, v.maxHealth)
-	end
-
-	local size = (ty - S.px(12)) - (y1 + pad)
-	local gap = S.px(6)
-	local picture = S.game.unitPicture
-	local shown = min(#v.types, MAX_GROUP_ICONS)
-	for i = 1, shown do
-		local e = v.types[i]
-		local ix = cx1 + (i - 1) * (size + gap)
-		if ix + size > cx2 then break end
-		S.Icon(ix, y1 + pad, ix + size, y1 + pad + size, picture and picture(e.defID) or ("#" .. e.defID))
-		S.Outline(ix, y1 + pad, ix + size, y1 + pad + size, t.buttonBorder, S.px(t.buttonRadius), 1)
-		local label = tostring(e.count)
-		local bw = max(S.px(18), S.TextWidth(label, 12) + S.px(6))
-		S.Rect(ix + size - bw, y1 + pad, ix + size, y1 + pad + S.px(17), { 0, 0, 0, 0.65 }, 0)
-		S.Text(label, ix + size - bw * 0.5, y1 + pad + S.px(4), 12, t.text, "c")
-	end
-end
-
-local function DrawText(v)
-	local t = S.theme
-	local pad = S.px(PAD)
-	local cx1, cx2 = x1 + pad + S.px(4), x2 - pad - S.px(4)
-	local ty = y2 - pad - S.px(18)
-	S.Text(S.Fit(v.title, 18, cx2 - cx1), cx1, ty, 18, t.text)
-	local lines = Wrap(v.text, 14, cx2 - cx1, 4)
-	for i = 1, #lines do
-		S.Text(lines[i], cx1, ty - S.px(4) - i * S.px(19), 14, t.textDim)
-	end
-end
-
-function widget:DrawScreen()
-	if WG.Slate ~= S or not x1 then return end
-	if spIsGUIHidden and spIsGUIHidden() then return end
-
-	-- Hover changes should feel instant; everything else can wait a moment.
-	if timer > 0.15 or S.hover ~= (view and view.hoverRef) then
-		timer = 0
-		view = Decide()
-		if view then view.hoverRef = S.hover end
-		viewVersion = viewVersion + 1
-	end
-
-	if not view then
-		S.Unblur(ID)
-		return
-	end
-
-	cache = S.Cached(cache, S.version .. ":" .. viewVersion, function()
-		S.Panel(x1, y1, x2, y2)
-		S.Blur(ID, x1, y1, x2, y2)
-		if view.kind == "unit" then DrawUnit(view)
-		elseif view.kind == "group" then DrawGroup(view)
-		else DrawText(view) end
-	end)
-	S.Flush()
-end
-
-function widget:IsAbove(mx, my)
-	return WG.Slate == S and view ~= nil and S.Inside(mx, my, x1, y1, x2, y2) or false
-end
-
-function widget:GetTooltip()
-	return ""
-end
-
-function widget:MousePress(mx, my)
-	-- swallow clicks on the panel so they do not reach the map underneath
-	return WG.Slate == S and view ~= nil and S.Inside(mx, my, x1, y1, x2, y2) or false
 end

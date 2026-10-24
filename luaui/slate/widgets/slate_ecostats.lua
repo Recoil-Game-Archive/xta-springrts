@@ -1,44 +1,70 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
-		name    = "Slate Economy Comparison",
-		desc    = "For spectators: every team's income side by side, with totals per alliance. Hidden while you are playing.",
+		name    = "Slate Eco Stats",
+		desc    = "For spectators: every team's economy side by side, with totals per alliance. Hidden while you are playing.",
 		author  = "Scary le Poo",
-		date    = "2026-10-09",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = 7,
 		enabled = true,
 	}
 end
 
-local ID = "ecostats"
-local WIDTH    = 340                -- design pixels
-local PAD_X, PAD_Y = 12, 10
-local HEADER_H = 40                 -- alliance row: label, totals, comparison bars
-local ROW_H    = 22
-local TOP_OFFSET = 16 + 44 + 16     -- under the clock and menu bar
-local MAX_H    = 620
+--------------------------------------------------------------------------------
+--  One panel at the top right, under the menu button, for spectators only.
+--  Each alliance is a group: a head with the alliance's total income per
+--  resource and a bar comparing it with the strongest alliance, then a row
+--  per team with its colour, name, income and stored amount per resource,
+--  and a bar comparing its income with the strongest team.
+--
+--  The markup is rebuilt only when the set of teams changes; the figures are
+--  restated twice a second through the view, which only touches what moved.
+--------------------------------------------------------------------------------
+
+local DOCUMENT_PATH = "ecostats.rml"
+local UPDATE_INTERVAL = 0.5
+local LAYOUT_NAME = "slate_ecostats"
+
+-- must match ecostats.rml: #ecostats width, and the heights that add up
+local PANEL_WIDTH = 340
+local PAD_Y       = 10    -- top and bottom padding of #ecostats
+local HEAD_H      = 42    -- an alliance head (.ghead)
+local ROW_H       = 24    -- a team row (.trow)
+local GROUP_GAP   = 8     -- below each group (.group margin-bottom)
+local MENU_CLEARANCE = 30 -- the menu button sits in the corner above this panel
 
 local spGetTeamResources = Spring.GetTeamResources
-local floor = math.floor
-local min, max = math.min, math.max
+local spGetTeamInfo      = Spring.GetTeamInfo
+local spGetTeamColor     = Spring.GetTeamColor
+local spGetAllyTeamList  = Spring.GetAllyTeamList
+local spGetTeamList      = Spring.GetTeamList
+local spGetGaiaTeamID    = Spring.GetGaiaTeamID
+local spGetSpectatingState = Spring.GetSpectatingState
 
-local S
-local x1, y1, x2, y2
-local groups = {}                   -- { label, teams = { { teamID, name, color, dead, income = { [key] = n } } }, total = { [key] = n } }
-local best = {}                     -- per resource key: highest alliance total and highest team income
-local rowCount = 0
-local rowH = ROW_H
-local timer = 10
-local active = false
-local dataVersion = 0
+local format = string.format
+local max = math.max
 
+local hud, S
+local document
+local view
+local SetText, SetClass, SetStyle
+local lastUpdate
+local active = false     -- a spectator is looking: the panel is on screen
+local resources = {}     -- from WG.Slate.game.resources: { key, label, color }
+local groups = {}        -- { ally, teams = { { teamID, name, color, dead } } }
+local shownKey           -- the team set the markup was built from
+local shownHeight
+
+--------------------------------------------------------------------------------
+-- teams
 --------------------------------------------------------------------------------
 
 local function TeamName(teamID)
-	local _, leader, _, isAI = Spring.GetTeamInfo(teamID, false)
+	local _, leader, _, isAI = spGetTeamInfo(teamID, false)
 	if isAI then
 		local _, aiName, _, shortName = Spring.GetAIInfo(teamID)
 		return (aiName and aiName ~= "" and aiName ~= "UNKNOWN") and aiName or shortName or "AI"
@@ -46,66 +72,165 @@ local function TeamName(teamID)
 	return Spring.GetPlayerInfo(leader or -1, false) or ("Team " .. teamID)
 end
 
-local function Layout()
-	local teams = max(1, rowCount)
-	local fixed = PAD_Y * 2 + #groups * HEADER_H
-	rowH = min(ROW_H, max(12, (MAX_H - fixed) / teams))
-	x1, y1, x2, y2 = S.Box(ID, "r", "t", S.theme.margin, TOP_OFFSET, WIDTH, fixed + teams * rowH)
-end
-
-local function Rebuild()
-	local spec = Spring.GetSpectatingState()
-	active = spec and true or false
-	if not active then
-		S.Unblur(ID)
-		return
-	end
-
-	local resources = S.game.resources or {}
-	local gaia = Spring.GetGaiaTeamID()
-	local list = {}
-	local count = 0
-	best = {}
-	for k = 1, #resources do best[resources[k].key] = { alliance = 0, team = 0 } end
-
-	local allies = Spring.GetAllyTeamList() or {}
-	for i = 1, #allies do
-		local group = { teams = {}, total = {} }
-		local ids = Spring.GetTeamList(allies[i]) or {}
-		for j = 1, #ids do
-			local teamID = ids[j]
+-- Every alliance with at least one team, each team with its name and
+-- colour. Also returns a key that changes when the set of teams does
+-- (a team dying changes its row's look, so it is part of the key).
+local function GatherTeams()
+	local gaia = spGetGaiaTeamID()
+	local list, keyParts = {}, {}
+	for _, ally in ipairs(spGetAllyTeamList() or {}) do
+		local group = { ally = ally, teams = {} }
+		for _, teamID in ipairs(spGetTeamList(ally) or {}) do
 			if teamID ~= gaia then
-				local _, _, isDead = Spring.GetTeamInfo(teamID, false)
-				local r, g, b = Spring.GetTeamColor(teamID)
-				local team = { teamID = teamID, name = TeamName(teamID), color = { r or 1, g or 1, b or 1, 1 }, dead = isDead, income = {} }
-				for k = 1, #resources do
-					local key = resources[k].key
-					local _, _, _, income = spGetTeamResources(teamID, key)
-					income = (not isDead and income) or 0
-					team.income[key] = income
-					group.total[key] = (group.total[key] or 0) + income
-					if income > best[key].team then best[key].team = income end
-				end
-				group.teams[#group.teams + 1] = team
+				local _, _, isDead = spGetTeamInfo(teamID, false)
+				local r, g, b = spGetTeamColor(teamID)
+				group.teams[#group.teams + 1] = {
+					teamID = teamID, name = TeamName(teamID),
+					color = { r or 1, g or 1, b or 1 }, dead = isDead and true or false,
+				}
+				keyParts[#keyParts + 1] = teamID .. (isDead and "d" or "")
 			end
 		end
 		if #group.teams > 0 then
-			group.label = "Team " .. (#list + 1)
-			for k = 1, #resources do
-				local key = resources[k].key
-				if (group.total[key] or 0) > best[key].alliance then best[key].alliance = group.total[key] end
-			end
 			list[#list + 1] = group
-			count = count + #group.teams
+			keyParts[#keyParts + 1] = "|"
+		end
+	end
+	return list, table.concat(keyParts, ",")
+end
+
+--------------------------------------------------------------------------------
+-- markup: built once per team set
+--------------------------------------------------------------------------------
+
+-- ids: g<ally>-<key> total, g<ally>-<key>-fill bar; t<team>-<key>-inc,
+-- t<team>-<key>-cur, t<team>-<key>-fill
+local function PanelRML()
+	local parts = {}
+	for gi, group in ipairs(groups) do
+		parts[#parts + 1] = '<div class="group">'
+		parts[#parts + 1] = format('<div class="ghead"><div class="gtop"><div class="label">Alliance %d</div>', gi)
+		for _, res in ipairs(resources) do
+			parts[#parts + 1] = format('<div class="col"><div id="g%d-%s" class="strong gtotal"/></div>', group.ally, res.key)
+		end
+		parts[#parts + 1] = '</div><div class="gbars"><div class="name"/>'
+		for _, res in ipairs(resources) do
+			parts[#parts + 1] = format('<div class="col"><div class="bar"><div id="g%d-%s-fill" class="bar-fill" style="background-color: %s;"/></div></div>',
+				group.ally, res.key, res.color or "#a9bdd0")
+		end
+		parts[#parts + 1] = '</div></div>'
+		for _, team in ipairs(group.teams) do
+			local c = team.color
+			parts[#parts + 1] = format('<div class="trow%s"><div class="name"><div class="sw" style="background-color: %s;"/><div class="tname" style="color: %s;">%s</div></div>',
+				team.dead and " dead" or "", hud.Rgb(c[1], c[2], c[3]), hud.ReadableColor(c[1], c[2], c[3]), hud.Escape(team.name))
+			for _, res in ipairs(resources) do
+				parts[#parts + 1] = format(
+					'<div class="col"><div class="figures"><div id="t%d-%s-inc" class="inc"/><div id="t%d-%s-cur" class="sub cur"/></div>'
+					.. '<div class="bar"><div id="t%d-%s-fill" class="bar-fill" style="background-color: %s;"/></div></div>',
+					team.teamID, res.key, team.teamID, res.key, team.teamID, res.key, res.color or "#a9bdd0")
+			end
+			parts[#parts + 1] = '</div>'
+		end
+		parts[#parts + 1] = '</div>'
+	end
+	return table.concat(parts)
+end
+
+local function PanelHeight()
+	local height = PAD_Y * 2
+	for _, group in ipairs(groups) do
+		height = height + HEAD_H + #group.teams * ROW_H + GROUP_GAP
+	end
+	return height
+end
+
+--------------------------------------------------------------------------------
+-- placement
+--------------------------------------------------------------------------------
+
+local function DefaultOrigin(vsx, vsy, w, h, scale)
+	local margin = hud.Margin() * scale
+	return vsx - margin - w, vsy - margin - MENU_CLEARANCE * scale - hud.Gap() * scale - h
+end
+
+local function Place()
+	local height = PanelHeight()
+	if height ~= shownHeight then
+		shownHeight = height
+		view.Element("ecostats").style["height"] = height .. "dp"
+	end
+	hud.PlacePanel(view.Element("ecostats"), LAYOUT_NAME, PANEL_WIDTH, height, DefaultOrigin)
+end
+
+--------------------------------------------------------------------------------
+-- refresh
+--------------------------------------------------------------------------------
+
+local function Percent(fraction)
+	return format("%d%%", math.floor(max(0, math.min(1, fraction)) * 100 + 0.5))
+end
+
+local function Refresh()
+	local spec = spGetSpectatingState() and true or false
+	if spec ~= active then
+		active = spec
+		SetClass("ecostats", "hidden", not active)
+	end
+	if not active then return end
+
+	local list, key = GatherTeams()
+	if key ~= shownKey then
+		shownKey = key
+		groups = list
+		view.Element("rows").inner_rml = PanelRML()
+		view.Forget()
+		view.Assume("ecostats", "hidden", false)
+		Place()
+	end
+
+	-- income and stored amount per team, totals and bests per resource
+	local income, current, totals = {}, {}, {}
+	local bestTeam, bestAlly = {}, {}
+	for _, res in ipairs(resources) do
+		local k = res.key
+		bestTeam[k], bestAlly[k] = 0, 0
+		for _, group in ipairs(groups) do
+			local total = 0
+			for _, team in ipairs(group.teams) do
+				local cur, _, _, inc = spGetTeamResources(team.teamID, k)
+				inc = (not team.dead and inc) or 0
+				income[team.teamID .. k] = inc
+				current[team.teamID .. k] = cur or 0
+				total = total + inc
+				if inc > bestTeam[k] then bestTeam[k] = inc end
+			end
+			totals[group.ally .. k] = total
+			if total > bestAlly[k] then bestAlly[k] = total end
 		end
 	end
 
-	local changed = (count ~= rowCount) or (#list ~= #groups) or not x1
-	groups, rowCount = list, count
-	dataVersion = dataVersion + 1
-	if changed then Layout() end
+	for _, group in ipairs(groups) do
+		for _, res in ipairs(resources) do
+			local k = res.key
+			local total = totals[group.ally .. k]
+			SetText("g" .. group.ally .. "-" .. k, "+" .. hud.Short(total))
+			SetStyle("g" .. group.ally .. "-" .. k .. "-fill", "width", Percent(bestAlly[k] > 0 and total / bestAlly[k] or 0))
+		end
+		for _, team in ipairs(group.teams) do
+			for _, res in ipairs(resources) do
+				local k = res.key
+				local id = "t" .. team.teamID .. "-" .. k
+				local inc = income[team.teamID .. k]
+				SetText(id .. "-inc", "+" .. hud.Short(inc))
+				SetText(id .. "-cur", hud.Short(current[team.teamID .. k]))
+				SetStyle(id .. "-fill", "width", Percent(bestTeam[k] > 0 and inc / bestTeam[k] or 0))
+			end
+		end
+	end
 end
 
+--------------------------------------------------------------------------------
+-- widget api
 --------------------------------------------------------------------------------
 
 function widget:Initialize()
@@ -114,110 +239,78 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 		return
 	end
-	S.Register(ID, "Economy comparison", Layout)
-	S.OnChange(ID, Layout)
-	S.SetTip(ID, function(mx, my)
-		if active and x1 and S.Inside(mx, my, x1, y1, x2, y2) then
-			return "Economy comparison", "Income per second for every team. The bars under each alliance compare its total with the strongest alliance; the bars beside each team compare it with the strongest team."
+	resources = S.game.resources or {}
+	if #resources == 0 then
+		Spring.Echo("[Slate Eco Stats] no resources in slate_game.lua")
+		widgetHandler:RemoveWidget()
+		return
+	end
+	local helpers = include("slate/rml/core.lua")
+	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not result then
+		Spring.Echo("[Slate Eco Stats] " .. tostring(reason))
+		widgetHandler:RemoveWidget()
+		return
+	end
+	hud = helpers
+	document = result
+	view = hud.NewView(document)
+	SetText, SetClass, SetStyle = view.SetText, view.SetClass, view.SetStyle
+	view.Assume("ecostats", "hidden", true)
+
+	S.SetTip(LAYOUT_NAME, function(mx, my)
+		if not active then return nil end
+		local panel = view.Element("ecostats")
+		local ok, left, top, w, h = pcall(function()
+			return panel.absolute_left, panel.absolute_top, panel.offset_width, panel.offset_height
+		end)
+		if not ok or not w then return nil end
+		local _, vsy = Spring.GetViewGeometry()
+		local y = vsy - my
+		if mx >= left and mx <= left + w and y >= top and y <= top + h then
+			return "Eco stats", "Income per second and stored amount for every team. The bar under each alliance compares its total with the strongest alliance; the bar beside each team compares it with the strongest team."
 		end
+		return nil
 	end)
-	Rebuild()
+
+	hud.RegisterPanel(LAYOUT_NAME, "Eco Stats", Place, function() return active end)
+	hud.OnChange(LAYOUT_NAME, Place)
+	Place()
+	Refresh()
+	hud.ShowPassive(document)
+	lastUpdate = Spring.GetTimer()
 end
 
 function widget:Shutdown()
 	if S then
-		S.SetTip(ID, nil)
-		S.Unregister(ID)
-		S.OffChange(ID)
-		S.Unblur(ID)
+		S.SetTip(LAYOUT_NAME, nil)
+	end
+	if hud then
+		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
+		document = nil
 	end
 end
 
 function widget:ViewResize()
-	if S and WG.Slate == S and x1 then Layout() end
-end
-
-function widget:Update(dt)
-	timer = timer + dt
-	if timer > 0.5 and S and WG.Slate == S then
-		timer = 0
-		Rebuild()
+	if hud and document then
+		hud.UpdateScale()
+		Place()
 	end
 end
 
-local cache
+function widget:PlayerChanged()
+	-- becoming a spectator (resign, /spectator) shows the panel right away
+	if document then Refresh() end
+end
 
-local function DrawPanel()
-	local t = S.theme
-	local resources = S.game.resources or {}
-	local nres = max(1, #resources)
-	S.Panel(x1, y1, x2, y2)
-	S.Blur(ID, x1, y1, x2, y2)
-
-	local padX = S.px(PAD_X)
-	local ix1, ix2 = x1 + padX, x2 - padX
-	local hh, rh = S.px(HEADER_H), S.px(rowH)
-	local nameW = S.px(118)
-	local colW = ((ix2 - ix1) - nameW) / nres       -- one column per resource
-	local size = min(13, rowH * 0.62)
-	local y = y2 - S.px(PAD_Y)
-
-	for g = 1, #groups do
-		local group = groups[g]
-
-		-- alliance: label, totals, and a bar per resource against the best alliance
-		local labelY = y - S.px(12)
-		S.Text(group.label:upper(), ix1, labelY, 11, t.accent, "v")
-		for k = 1, #resources do
-			local res = resources[k]
-			local cx1 = ix1 + nameW + (k - 1) * colW
-			local cx2 = cx1 + colW - S.px(8)
-			local total = group.total[res.key] or 0
-			S.Text("+" .. S.Short(total), cx2, labelY, 13, t.text, "rv")
-			local bh = max(3, S.px(5))
-			local by = y - S.px(30)
-			local top = best[res.key].alliance
-			S.Bar(cx1, by, cx2, by + bh, (top > 0) and (total / top) or 0, res.color)
-		end
-		y = y - hh
-
-		for i = 1, #group.teams do
-			local team = group.teams[i]
-			local mid = y - rh * 0.5
-			local sw = S.px(10)
-			S.Rect(ix1, mid - sw * 0.5, ix1 + sw, mid + sw * 0.5, team.color, S.px(2))
-			S.Text(S.Fit(team.name, size, nameW - sw - S.px(12)), ix1 + sw + S.px(7), mid, size, team.dead and t.textDim or t.text, "v")
-			for k = 1, #resources do
-				local res = resources[k]
-				local cx1 = ix1 + nameW + (k - 1) * colW
-				local cx2 = cx1 + colW - S.px(8)
-				local income = team.income[res.key] or 0
-				local textW = S.px(46)
-				local bh = max(3, S.px(4))
-				local top = best[res.key].team
-				S.Bar(cx1, mid - bh * 0.5, cx2 - textW, mid + bh * 0.5, (top > 0) and (income / top) or 0, res.color)
-				S.Text(S.Short(income), cx2, mid, size, team.dead and t.textDim or t.text, "rv")
-			end
-			y = y - rh
-		end
+function widget:Update()
+	if not document then return end
+	if hud.FollowGuiHidden(document) then return end
+	local now = Spring.GetTimer()
+	if Spring.DiffTimers(now, lastUpdate) >= UPDATE_INTERVAL then
+		lastUpdate = now
+		Refresh()
 	end
-end
-
-function widget:DrawScreen()
-	if WG.Slate ~= S or not active or not x1 or #groups == 0 then return end
-	if Spring.IsGUIHidden() then return end
-	cache = S.Cached(cache, S.version .. ":" .. dataVersion, DrawPanel)
-	S.Flush()
-end
-
-function widget:IsAbove(mx, my)
-	return (WG.Slate == S and active and x1 and S.Inside(mx, my, x1, y1, x2, y2)) or false
-end
-
-function widget:GetTooltip()
-	return ""
-end
-
-function widget:MousePress(mx, my)
-	return (WG.Slate == S and active and x1 and S.Inside(mx, my, x1, y1, x2, y2)) or false
 end

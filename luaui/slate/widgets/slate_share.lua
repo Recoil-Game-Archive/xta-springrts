@@ -1,157 +1,369 @@
--- Part of Slate, a game-neutral UI suite for Total Annihilation style games.
--- Derived from the Static GUI suite in Splinter Faction (same author, GPL v2+).
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Share",
-		desc    = "Share resources and units with another player. Press H, use the Menu, click an ally in the players list, or /slate share.",
+		desc    = "Share resources and units with another team (H, or Share in the menu)",
 		author  = "Scary le Poo",
-		date    = "2026-10-09",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
-		layer   = -13,              -- after Slate Key Bindings, so the player's own keys are loaded first
+		layer   = -500, -- before the game menu, so Esc closes this first
 		enabled = true,
 	}
 end
 
 --------------------------------------------------------------------------------
--- Same arrangement as the Static GUI share menu:
+--  Share window: give metal, energy and units to another team.
 --
---   left column  = who  : Allies, Enemies
---   right column = what : Selected units + "share selected units", one slider
---                         per resource
---   footer       = Cancel | Apply
+--  H opens and closes it (so does Share in the game menu); Esc or the X
+--  closes it. Click a team on the left, set how much metal and energy to send
+--  with the sliders on the right, tick "Share selected units" to hand over the
+--  selection as well, then Apply. The window stays open after Apply.
 --
--- Pick one player, set what to send, press Apply. The window stays open so
--- several gifts can be made in a row; H or Esc closes it.
+--  WG.SlateShare: Toggle(), Open(teamID) (the team comes pre-selected),
+--  Close().
 --------------------------------------------------------------------------------
 
-local ID = "share"
-local ACTION = "luaui slate share"
+local DOCUMENT_PATH = "share.rml"
 
--- design pixels
-local WIDTH        = 640
-local PAD          = 16
-local HEADER_H     = 18
-local ROW_H        = 28
-local ENEMY_ROWS   = 3              -- allies get the rest of the left column
-local UNIT_LINE_H  = 21
-local UNIT_LINES   = 4
-local CHECK_H      = 28
-local SLIDER_H     = 52
-local BUTTON_H     = 34
-local GAP          = 6
-local GROUP_GAP    = 14
-local FOOTER_GAP   = 30             -- also holds the status line
-local BAR_W        = 6
+-- must match #share in share.rml
+local PANEL_WIDTH  = 640
+local PANEL_HEIGHT = 424
+local RAISE        = 60 -- the window sits this far above the middle of the screen
+
+local LAYOUT_NAME = "slate_share"
+
+local UPDATE_INTERVAL = 0.25
+local RESULT_SECONDS  = 4
+
+local KEY_ESCAPE = 27
+local KEY_H      = 104 -- 'h'; the engine reports the same code with shift held
 
 local floor = math.floor
-local min, max = math.min, math.max
 
-local S
-local open = false
-local closeRect
-local wx1, wy1, wx2, wy2
-local g = nil                       -- rectangles from the last draw, for hit tests
+local hud, S
+local document
+local view
+local lastUpdate
 
-local allies, enemies = {}, {}      -- { teamID, name, color }
-local target                        -- teamID
-local units = {}                    -- { name, count }
-local scroll = { ally = 0, enemy = 0, unit = 0 }   -- first row shown, counted from 0
-local amount = {}                   -- per resource key
+local isOpen = false
+
+local allies  = {}   -- {teamID, name, r, g, b, selected}; row i has the id "ally<i>"
+local enemies = {}   -- the same, with the id "enemy<i>"
+local unitsMarkup    -- the selected units' markup, as last set
+
+local amount   = {metal = 0, energy = 0}  -- what the sliders say to send
+local storage  = {metal = 1, energy = 1}  -- the sliders' range: my storage
+local dragging       -- "metal" or "energy" while a slider is held
 local shareUnits = false
-local drag                          -- { slider = key } or { list = name, grab = px }
-local notice = ""
-local boundKey = false
+local result, resultUntil  -- a line saying what Apply did, and until when it shows
 
 --------------------------------------------------------------------------------
--- Data
+-- reading the game
 --------------------------------------------------------------------------------
 
-local function TeamName(teamID)
-	local _, leader, _, isAI = Spring.GetTeamInfo(teamID, false)
+local function GetTeamDisplayName(teamID)
+	-- Spring.GetPlayerList(teamID) may not work in all engine versions.
+	-- Instead iterate all players and match by team.
+	for _, pid in ipairs(Spring.GetPlayerList() or {}) do
+		local name, _, _, playerTeam = Spring.GetPlayerInfo(pid, false)
+		if name and playerTeam == teamID then
+			return name
+		end
+	end
+	local _, _, _, isAI = Spring.GetTeamInfo(teamID, false)
 	if isAI then
-		local _, aiName, _, shortName = Spring.GetAIInfo(teamID)
-		return (aiName and aiName ~= "" and aiName ~= "UNKNOWN") and aiName or shortName or "AI"
+		local aiName = Spring.GetTeamLuaAI(teamID)
+		if aiName and aiName ~= "" then
+			return aiName
+		end
 	end
-	return Spring.GetPlayerInfo(leader or -1, false) or ("Team " .. teamID)
+	return "Team " .. teamID
 end
 
-local function RefreshPlayers()
+-- every living team but mine, split into allies and enemies
+local function RefreshPlayerLists()
 	allies, enemies = {}, {}
-	local myTeam, myAlly = Spring.GetMyTeamID(), Spring.GetMyAllyTeamID()
-	local gaia = Spring.GetGaiaTeamID()
-	local found = false
-	local teams = Spring.GetTeamList() or {}
-	for i = 1, #teams do
-		local teamID = teams[i]
-		if teamID ~= myTeam and teamID ~= gaia then
-			local _, _, isDead, _, _, allyTeam = Spring.GetTeamInfo(teamID, false)
+	local myTeam     = Spring.GetMyTeamID()
+	local myAllyTeam = Spring.GetMyAllyTeamID()
+	local gaiaTeam   = Spring.GetGaiaTeamID()
+	for _, teamID in ipairs(Spring.GetTeamList() or {}) do
+		if teamID ~= myTeam and teamID ~= gaiaTeam then
+			local _, _, isDead, _, _, allyTeamID = Spring.GetTeamInfo(teamID, false)
 			if not isDead then
-				local r, gg, b = Spring.GetTeamColor(teamID)
-				local entry = { teamID = teamID, name = TeamName(teamID), color = { r or 1, gg or 1, b or 1, 1 } }
-				local list = (allyTeam == myAlly) and allies or enemies
+				local r, g, b = Spring.GetTeamColor(teamID)
+				local entry = {teamID = teamID, name = GetTeamDisplayName(teamID), r = r or 1, g = g or 1, b = b or 1, selected = false}
+				local list = (allyTeamID == myAllyTeam) and allies or enemies
 				list[#list + 1] = entry
-				if teamID == target then found = true end
 			end
 		end
 	end
-	if not found then target = nil end
 end
 
-local function RefreshUnits()
-	units = {}
-	local index = {}
-	local sel = Spring.GetSelectedUnits() or {}
-	for i = 1, #sel do
-		local defID = Spring.GetUnitDefID(sel[i])
-		local ud = defID and UnitDefs[defID]
-		if ud then
-			local name = ud.translatedHumanName or ud.humanName or ud.name
-			local at = index[name]
-			if not at then
-				at = #units + 1
-				index[name] = at
-				units[at] = { name = name, count = 0 }
+-- the selection as {name, count}, in the order the types were met
+local function SelectedUnitTypes()
+	local counts, order = {}, {}
+	for _, unitID in ipairs(Spring.GetSelectedUnits() or {}) do
+		local defID = Spring.GetUnitDefID(unitID)
+		if defID then
+			local name = hud.UnitName(UnitDefs[defID])
+			if not counts[name] then
+				counts[name] = 0
+				order[#order + 1] = name
 			end
-			units[at].count = units[at].count + 1
+			counts[name] = counts[name] + 1
 		end
 	end
-end
-
-local function Storage(key)
-	local _, storage = Spring.GetTeamResources(Spring.GetMyTeamID(), key)
-	return floor(storage or 0)
-end
-
-local function TargetName()
-	for _, list in ipairs({ allies, enemies }) do
-		for i = 1, #list do
-			if list[i].teamID == target then return list[i].name end
-		end
+	local types = {}
+	for i, name in ipairs(order) do
+		types[i] = {name = name, count = counts[name]}
 	end
-	return "?"
+	return types
+end
+
+local function ReadStorage()
+	local myTeam = Spring.GetMyTeamID()
+	local _, metal = Spring.GetTeamResources(myTeam, "metal")
+	local _, energy = Spring.GetTeamResources(myTeam, "energy")
+	storage.metal = math.max(1, floor(metal or 1))
+	storage.energy = math.max(1, floor(energy or 1))
+	amount.metal = math.max(0, math.min(amount.metal, storage.metal))
+	amount.energy = math.max(0, math.min(amount.energy, storage.energy))
 end
 
 --------------------------------------------------------------------------------
--- Open / close
+-- showing
 --------------------------------------------------------------------------------
+
+local function PlayerListRML(list, prefix)
+	if #list == 0 then
+		return '<div class="empty">(none)</div>'
+	end
+	local parts = {}
+	for i, entry in ipairs(list) do
+		parts[i] = string.format(
+			'<div id="%s%d" class="player" data-%s="%d"><div class="swatch" style="background-color: %s;"/><div>%s</div></div>',
+			prefix, i, prefix, i, hud.Rgb(entry.r, entry.g, entry.b), hud.Escape(entry.name))
+	end
+	return table.concat(parts)
+end
+
+local function ShowPlayerLists()
+	view.Element("allies").inner_rml = PlayerListRML(allies, "ally")
+	view.Element("enemies").inner_rml = PlayerListRML(enemies, "enemy")
+	view.Forget()
+	unitsMarkup = nil
+end
+
+local function Percent(value, max)
+	return string.format("%.1f%%", floor(math.max(0, math.min(1, value / math.max(1, max))) * 200 + 0.5) / 2)
+end
+
+local function Refresh()
+	view.SetClass("share", "hidden", not isOpen)
+	if not isOpen then
+		return
+	end
+	ReadStorage()
+
+	for i, entry in ipairs(allies) do
+		view.SetClass("ally" .. i, "selected", entry.selected)
+	end
+	for i, entry in ipairs(enemies) do
+		view.SetClass("enemy" .. i, "selected", entry.selected)
+	end
+
+	local types = SelectedUnitTypes()
+	local parts = {}
+	for i, entry in ipairs(types) do
+		parts[i] = string.format('<div class="urow"><div>%s</div><div class="grow"/><div class="ucount">%s</div></div>',
+			hud.Escape(entry.name), (entry.count > 1) and ("x" .. entry.count) or "")
+	end
+	local markup = (#parts > 0) and table.concat(parts) or '<div class="empty">(no units selected)</div>'
+	if markup ~= unitsMarkup then
+		unitsMarkup = markup
+		view.Element("units").inner_rml = markup
+	end
+	view.SetClass("check", "on", shareUnits)
+
+	for _, name in ipairs({"metal", "energy"}) do
+		local position = Percent(amount[name], storage[name])
+		view.SetStyle(name .. "-fill", "width", position)
+		view.SetStyle(name .. "-handle", "left", position)
+		view.SetClass(name .. "-handle", "dragging", dragging == name)
+		view.SetText(name .. "-amount", tostring(amount[name]))
+		view.SetText(name .. "-max", "/ " .. storage[name])
+	end
+
+	if result and os.clock() > resultUntil then
+		result = nil
+	end
+	view.SetText("result", hud.Escape(result or ""))
+end
+
+--------------------------------------------------------------------------------
+-- apply
+--------------------------------------------------------------------------------
+
+local function Say(text)
+	result = text
+	resultUntil = os.clock() + RESULT_SECONDS
+end
+
+local function DoApply()
+	local targets = {}
+	for _, entry in ipairs(allies) do
+		if entry.selected then targets[#targets + 1] = entry.teamID end
+	end
+	for _, entry in ipairs(enemies) do
+		if entry.selected then targets[#targets + 1] = entry.teamID end
+	end
+	if #targets == 0 then
+		Say("Choose who to give to first.")
+		return
+	end
+
+	local metalEach  = floor(amount.metal / #targets)
+	local energyEach = floor(amount.energy / #targets)
+	for _, teamID in ipairs(targets) do
+		if metalEach > 0 then Spring.ShareResources(teamID, "metal", metalEach) end
+		if energyEach > 0 then Spring.ShareResources(teamID, "energy", energyEach) end
+	end
+
+	local sharedUnits = 0
+	if shareUnits then
+		local targetTeam = targets[1]
+		local unitIDs = Spring.GetSelectedUnits() or {}
+		if #unitIDs > 0 then
+			-- "units" transfers the whole selection in one call
+			Spring.ShareResources(targetTeam, "units")
+			sharedUnits = #unitIDs
+			Spring.Echo(string.format("[Slate Share] Shared %d unit(s) to team %d", sharedUnits, targetTeam))
+		end
+	end
+
+	local sent = {}
+	if metalEach > 0 then sent[#sent + 1] = metalEach .. " metal" end
+	if energyEach > 0 then sent[#sent + 1] = energyEach .. " energy" end
+	if sharedUnits > 0 then sent[#sent + 1] = sharedUnits .. ((sharedUnits == 1) and " unit" or " units") end
+	Say((#sent > 0) and ("Sent " .. table.concat(sent, ", ") .. ".") or "Nothing to send.")
+
+	amount.metal, amount.energy = 0, 0
+end
+
+--------------------------------------------------------------------------------
+-- open and close
+--------------------------------------------------------------------------------
+
+local function DefaultOrigin(vsx, vsy, w, h, scale)
+	return (vsx - w) * 0.5, vsy * 0.5 + RAISE * scale - h * 0.5
+end
+
+local function Place()
+	hud.PlacePanel(view.Element("share"), LAYOUT_NAME, PANEL_WIDTH, PANEL_HEIGHT, DefaultOrigin)
+end
+
+-- Marks teamID as the one to give to. A team the lists do not have (it died
+-- since they were built, say) is looked up again and added if it is alive.
+local function Select(teamID)
+	local function Find()
+		for _, e in ipairs(allies) do
+			if e.teamID == teamID then return e end
+		end
+		for _, e in ipairs(enemies) do
+			if e.teamID == teamID then return e end
+		end
+	end
+	local entry = Find()
+	if not entry then
+		RefreshPlayerLists()
+		ShowPlayerLists()
+		entry = Find()
+	end
+	if entry then
+		entry.selected = true
+	end
+end
+
+local function Open(teamID)
+	if not document then
+		return
+	end
+	if not isOpen then
+		isOpen = true
+		amount.metal, amount.energy = 0, 0
+		shareUnits = false
+		dragging = nil
+		result = nil
+		RefreshPlayerLists()
+		ShowPlayerLists()
+		pcall(function() document:PullToFront() end)
+		hud.Sound("click")
+	end
+	if teamID then
+		for _, e in ipairs(allies) do e.selected = false end
+		for _, e in ipairs(enemies) do e.selected = false end
+		Select(teamID)
+	end
+	Refresh()
+end
 
 local function Close()
-	open = false
-	drag = nil
-	if S then S.Unblur(ID) end
+	if not isOpen then
+		return
+	end
+	isOpen = false
+	dragging = nil
+	hud.Sound("click")
+	Refresh()
 end
 
-local function Open(wanted)
-	open = true
-	notice = ""
-	amount = {}
-	shareUnits = false
-	scroll.ally, scroll.enemy, scroll.unit = 0, 0, 0
-	target = wanted
-	RefreshPlayers()
-	RefreshUnits()
+local function Toggle()
+	if isOpen then
+		Close()
+	else
+		Open()
+	end
 end
+
+--------------------------------------------------------------------------------
+-- input
+--------------------------------------------------------------------------------
+
+-- one team at a time: clicking a team picks it, clicking it again lets go
+local function Pick(list, index)
+	local entry = list[index]
+	if not entry then
+		return
+	end
+	local was = entry.selected
+	for _, e in ipairs(allies) do e.selected = false end
+	for _, e in ipairs(enemies) do e.selected = false end
+	entry.selected = not was
+	hud.Sound("click")
+	Refresh()
+end
+
+local function ListenToList(id, attribute, list)
+	view.Element(id):AddEventListener("mousedown", function(event)
+		if event.parameters and event.parameters.button == 0 then
+			Pick(list(), hud.EventAttribute(event, attribute))
+		end
+	end)
+end
+
+local function SlideTo(name)
+	local fraction = hud.MouseFraction(view.Element(name .. "-slider"))
+	if fraction then
+		amount[name] = floor(fraction * storage[name] + 0.5)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- widget api
+--------------------------------------------------------------------------------
 
 function widget:Initialize()
 	S = WG.Slate
@@ -159,403 +371,120 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 		return
 	end
-	-- H opens this instead of the engine's share dialog, unless the player has
-	-- already put the window on a key of their own.
-	local keys = Spring.GetActionHotKeys(ACTION)
-	if not keys or #keys == 0 then
-		Spring.SendCommands("unbind Any+h sharedialog", "bind Any+h " .. ACTION)
-		boundKey = true
+	local helpers = include("slate/rml/core.lua")
+	local loaded, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
+	if not loaded then
+		Spring.Echo("[Slate Share] " .. tostring(reason))
+		widgetHandler:RemoveWidget()
+		return
 	end
+	hud = helpers
+	document = loaded
+
+	view = hud.NewView(document)
+	view.Assume("share", "hidden", true) -- set in the markup
+
+	-- H is this window's key, not the engine's share dialog
+	local function TakeKey()
+		Spring.SendCommands("unbindkeyset h")
+		Spring.SendCommands("unbindkeyset H")
+	end
+	TakeKey()
+	if WG.SlateKeybindings and WG.SlateKeybindings.AddReapplyHook then
+		WG.SlateKeybindings.AddReapplyHook("Share", TakeKey)
+	end
+
+	hud.OnClick(view, "close", Close)
+	hud.OnClick(view, "cancel", Close)
+	hud.OnClick(view, "apply", function()
+		hud.Sound("click")
+		DoApply()
+		Refresh()
+	end)
+	hud.OnClick(view, "check-row", function()
+		shareUnits = not shareUnits
+		hud.Sound("click")
+		Refresh()
+	end)
+	ListenToList("allies", "data-ally", function() return allies end)
+	ListenToList("enemies", "data-enemy", function() return enemies end)
+	for _, name in ipairs({"metal", "energy"}) do
+		hud.OnDrag(view, name .. "-slider", function()
+			dragging = name
+			SlideTo(name)
+			Refresh()
+		end, function()
+			if dragging then
+				dragging = nil
+				Refresh()
+			end
+		end)
+	end
+
+	WG.SlateShare = {Toggle = Toggle, Open = Open, Close = Close}
+
+	hud.RegisterPanel(LAYOUT_NAME, "Share", Place, function() return isOpen end)
+	hud.OnChange(LAYOUT_NAME, Place)
+	Place()
+
+	hud.ShowPassive(document)
+	lastUpdate = Spring.GetTimer()
 end
 
 function widget:Shutdown()
-	if boundKey then
-		Spring.SendCommands("unbind Any+h " .. ACTION, "bind Any+h sharedialog")
+	WG.SlateShare = nil
+	if hud then
+		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
 	end
-	if S then S.Unblur(ID) end
-end
-
-function widget:TextCommand(command)
-	if command:sub(1, 11) ~= "slate share" then return false end
-	if WG.Slate ~= S then return false end
-	local wanted = tonumber(command:match("^slate share%s+(%d+)"))
-	if open and not wanted then
-		Close()
-	elseif open then
-		target = wanted
-		RefreshPlayers()
-	else
-		Open(wanted)
+	if WG.SlateKeybindings and WG.SlateKeybindings.RemoveReapplyHook then
+		WG.SlateKeybindings.RemoveReapplyHook("Share")
 	end
-	return true
-end
-
-function widget:Update()
-	if open then RefreshUnits() end
-end
-
---------------------------------------------------------------------------------
--- Drawing
---------------------------------------------------------------------------------
-
--- Section label, in the same small capitals as the other Slate panels.
-local function Header(r, label, note)
-	local t = S.theme
-	local mid = (r.y1 + r.y2) * 0.5
-	S.Text(label:upper(), r.x1, mid, 12, t.accent, "v")
-	if note then
-		S.Text(note, r.x1 + S.TextWidth(label:upper(), 12) + S.px(10), mid, 12, t.textDim, "v")
+	if document then
+		hud.CloseDocument(document)
+		document = nil
+		Spring.SendCommands("bind h sharedialog")
 	end
 end
 
--- Rows that fit in a list box, and the furthest it can scroll.
-local function ListRows(r, rowH, count)
-	local rows = max(1, floor((r.y2 - r.y1) / rowH + 0.01))
-	return rows, max(0, count - rows)
-end
-
-local function Scrollbar(r, rowH, count, first, mx, my)
-	local rows, maxFirst = ListRows(r, rowH, count)
-	if maxFirst == 0 then return end
-	local t = S.theme
-	local bx1 = r.x2 - S.px(BAR_W)
-	local trackH = r.y2 - r.y1
-	local thumbH = max(S.px(16), trackH * rows / count)
-	local ty2 = r.y2 - (trackH - thumbH) * (first / maxFirst)
-	S.Rect(bx1, r.y1, r.x2, r.y2, t.track, 0)
-	local over = S.Inside(mx, my, bx1, r.y1, r.x2, r.y2)
-	S.Rect(bx1, ty2 - thumbH, r.x2, ty2, over and t.buttonActive or t.buttonHover, 0)
-end
-
-local function PlayerList(r, list, first, mx, my)
-	local t = S.theme
-	local rowH = S.px(ROW_H)
-	S.Rect(r.x1, r.y1, r.x2, r.y2, t.track, S.px(4))
-	local rows = ListRows(r, rowH, #list)
-	local rx2 = r.x2 - S.px(BAR_W) - 2
-	for i = 1, rows do
-		local e = list[first + i]
-		if not e then break end
-		local y2 = r.y2 - (i - 1) * rowH
-		local y1 = y2 - rowH
-		local on = (e.teamID == target)
-		if on then
-			local c = e.color
-			S.Rect(r.x1, y1, rx2, y2, { c[1] * 0.35, c[2] * 0.35, c[3] * 0.35, 0.55 }, 0)
-			S.Rect(r.x1, y1, r.x1 + S.px(3), y2, c, 0)
-		elseif S.Inside(mx, my, r.x1, y1, rx2, y2) then
-			S.Rect(r.x1, y1, rx2, y2, t.buttonHover, 0)
-		end
-		local sw = S.px(12)
-		local mid = (y1 + y2) * 0.5
-		S.Rect(r.x1 + S.px(8), mid - sw * 0.5, r.x1 + S.px(8) + sw, mid + sw * 0.5, e.color, S.px(2))
-		S.Text(S.Fit(e.name, 13, rx2 - r.x1 - S.px(36)), r.x1 + S.px(28), mid, 13, on and t.text or t.textDim, "v")
-	end
-	Scrollbar(r, rowH, #list, first, mx, my)
-end
-
-local function SliderTrack(r)
-	local pad = S.px(12)
-	local mid = r.y2 - S.px(18)
-	local h = S.px(8)
-	return r.x1 + pad, mid - h * 0.5, r.x2 - pad, mid + h * 0.5
-end
-
-function widget:DrawScreen()
-	if not open or WG.Slate ~= S then return end
-	if Spring.IsGUIHidden() then return end
-	local t = S.theme
-	local mx, my = Spring.GetMouseState()
-	local resources = S.game.resources or {}
-
-	-- column heights, in design pixels
-	local rightH = HEADER_H + GAP + UNIT_LINE_H * UNIT_LINES + GAP + CHECK_H
-	             + #resources * (GROUP_GAP + HEADER_H + GAP + SLIDER_H)
-	local enemyH = ROW_H * ENEMY_ROWS
-	local allyH  = max(ROW_H * 2, rightH - (HEADER_H + GAP) - GROUP_GAP - (HEADER_H + GAP + enemyH))
-	local colH   = max(rightH, (HEADER_H + GAP + allyH) + GROUP_GAP + (HEADER_H + GAP + enemyH))
-	local height = 44 + PAD + colH + FOOTER_GAP + BUTTON_H + PAD
-
-	local top
-	wx1, wy1, wx2, top, closeRect = S.Window(ID, WIDTH, height, "Share", mx, my)
-	wy2 = top + S.px(44)
-
-	if Spring.GetSpectatingState() then
-		S.Text("Spectators cannot share.", wx1 + S.px(PAD), top - S.px(30), 14, t.textDim, "v")
-		g = nil
-		S.Flush()
-		return
-	end
-
-	local pad = S.px(PAD)
-	local colW = floor((wx2 - wx1 - pad * 3) * 0.5)
-	local lx1, lx2 = wx1 + pad, wx1 + pad + colW
-	local rx1, rx2 = wx2 - pad - colW, wx2 - pad
-	local cursor
-	local function Next(x1, x2, h, gapAfter)
-		local r = { x1 = x1, x2 = x2, y2 = cursor, y1 = cursor - S.px(h) }
-		cursor = r.y1 - S.px(gapAfter or GAP)
-		return r
-	end
-
-	g = { sliders = {} }
-
-	-- left: who
-	cursor = top - pad
-	local allyHdr  = Next(lx1, lx2, HEADER_H)
-	g.ally         = Next(lx1, lx2, allyH, GROUP_GAP)
-	local enemyHdr = Next(lx1, lx2, HEADER_H)
-	g.enemy        = Next(lx1, lx2, enemyH)
-	Header(allyHdr, "Allies", "click to select")
-	PlayerList(g.ally, allies, scroll.ally, mx, my)
-	if #allies == 0 then
-		S.Text("(no allies)", g.ally.x1 + S.px(10), g.ally.y2 - S.px(ROW_H) * 0.5, 13, t.textDim, "v")
-	end
-	Header(enemyHdr, "Enemies", "sharing to enemies is unusual")
-	PlayerList(g.enemy, enemies, scroll.enemy, mx, my)
-
-	-- right: what
-	cursor = top - pad
-	local unitHdr = Next(rx1, rx2, HEADER_H)
-	g.unit        = Next(rx1, rx2, UNIT_LINE_H * UNIT_LINES)
-	g.check       = Next(rx1, rx2, CHECK_H, GROUP_GAP)
-	Header(unitHdr, "Selected units")
-	S.Rect(g.unit.x1, g.unit.y1, g.unit.x2, g.unit.y2, t.track, S.px(4))
-	if #units == 0 then
-		S.Text("(no units selected)", g.unit.x1 + S.px(10), (g.unit.y1 + g.unit.y2) * 0.5, 13, t.textDim, "v")
-	else
-		local lh = S.px(UNIT_LINE_H)
-		local rows = ListRows(g.unit, lh, #units)
-		local ux2 = g.unit.x2 - S.px(BAR_W) - S.px(8)
-		for i = 1, rows do
-			local u = units[scroll.unit + i]
-			if not u then break end
-			local mid = g.unit.y2 - (i - 0.5) * lh
-			S.Text(S.Fit(u.name, 13, ux2 - g.unit.x1 - S.px(60)), g.unit.x1 + S.px(10), mid, 13, t.text, "v")
-			if u.count > 1 then S.Text("x" .. u.count, ux2, mid, 13, t.good, "rv") end
-		end
-		Scrollbar(g.unit, lh, #units, scroll.unit, mx, my)
-	end
-
-	-- checkbox
-	do
-		local r = g.check
-		local cs = S.px(16)
-		local mid = (r.y1 + r.y2) * 0.5
-		local over = S.Inside(mx, my, r.x1, r.y1, r.x2, r.y2)
-		S.Button(r.x1, mid - cs * 0.5, r.x1 + cs, mid + cs * 0.5, over and "hover" or nil)
-		if shareUnits then
-			local m = S.px(4)
-			S.Rect(r.x1 + m, mid - cs * 0.5 + m, r.x1 + cs - m, mid + cs * 0.5 - m, t.good, S.px(2))
-		end
-		S.Text("Share selected units", r.x1 + cs + S.px(8), mid, 13, t.text, "v")
-	end
-
-	-- one slider per resource: how much to send, out of what storage can hold
-	for i = 1, #resources do
-		local res = resources[i]
-		local hdr = Next(rx1, rx2, HEADER_H)
-		local box = Next(rx1, rx2, SLIDER_H, GROUP_GAP)
-		Header(hdr, res.label, "to send")
-		S.Rect(box.x1, box.y1, box.x2, box.y2, t.track, S.px(4))
-		local storage = Storage(res.key)
-		local amt = min(amount[res.key] or 0, storage)
-		amount[res.key] = amt
-		local tx1, ty1, tx2, ty2 = SliderTrack(box)
-		local frac = (storage > 0) and (amt / storage) or 0
-		S.Bar(tx1, ty1, tx2, ty2, frac, res.color)
-		local kx = tx1 + (tx2 - tx1) * frac
-		local hw = S.px(4)
-		local active = drag and drag.slider == res.key
-		S.Rect(kx - hw, ty1 - S.px(4), kx + hw, ty2 + S.px(4), active and t.warn or t.text, S.px(2))
-		S.Text(S.Number(amt) .. " / " .. S.Number(storage), (tx1 + tx2) * 0.5, box.y1 + S.px(12), 12, t.textDim, "cv")
-		g.sliders[#g.sliders + 1] = { key = res.key, box = box, x1 = tx1, x2 = tx2, y1 = ty1, y2 = ty2, max = storage }
-	end
-
-	-- footer: Cancel under the left column, Apply under the right
-	local by2 = top - pad - S.px(colH) - S.px(FOOTER_GAP)
-	local by1 = by2 - S.px(BUTTON_H)
-	if notice ~= "" then
-		S.Text(S.Fit(notice, 13, wx2 - wx1 - pad * 2), wx1 + pad, by2 + S.px(FOOTER_GAP) * 0.5, 13, t.textDim, "v")
-	end
-	g.cancel = { x1 = lx1, y1 = by1, x2 = lx2, y2 = by2 }
-	g.apply  = { x1 = rx1, y1 = by1, x2 = rx2, y2 = by2 }
-	local function Footer(r, label)
-		local over = S.Inside(mx, my, r.x1, r.y1, r.x2, r.y2)
-		S.Button(r.x1, r.y1, r.x2, r.y2, over and "hover" or nil)
-		S.Text(label, (r.x1 + r.x2) * 0.5, (r.y1 + r.y2) * 0.5 - S.px(1), 14, t.text, "cv")
-	end
-	Footer(g.cancel, "Cancel")
-	Footer(g.apply, "Apply")
-
-	S.Flush()
-end
-
---------------------------------------------------------------------------------
--- Apply
---------------------------------------------------------------------------------
-
-local function Apply()
-	if not target then
-		notice = "Pick a player first."
-		return
-	end
-	local resources = S.game.resources or {}
-	local done = {}
-	for i = 1, #resources do
-		local res = resources[i]
-		local amt = floor(amount[res.key] or 0)
-		if amt > 0 then
-			Spring.ShareResources(target, res.key, amt)
-			done[#done + 1] = S.Number(amt) .. " " .. res.label:lower()
-			amount[res.key] = 0
-		end
-	end
-	if shareUnits then
-		local count = Spring.GetSelectedUnitsCount() or 0
-		if count > 0 then
-			Spring.ShareResources(target, "units")
-			done[#done + 1] = count .. " unit" .. (count == 1 and "" or "s")
-		end
-	end
-	if #done == 0 then
-		notice = "Nothing to send: move a slider or tick the units box."
-	else
-		notice = "Sent " .. table.concat(done, ", ") .. " to " .. TargetName() .. "."
+function widget:ViewResize()
+	if hud and document then
+		hud.UpdateScale()
+		Place()
 	end
 end
 
---------------------------------------------------------------------------------
--- Input
---------------------------------------------------------------------------------
-
-local function InWindow(mx, my)
-	return open and wx1 and S.Inside(mx, my, wx1, wy1, wx2, wy2)
-end
-
-local function In(r, mx, my)
-	return r and S.Inside(mx, my, r.x1, r.y1, r.x2, r.y2)
-end
-
-local function SliderAmount(s, mx)
-	return floor(min(1, max(0, (mx - s.x1) / (s.x2 - s.x1))) * s.max + 0.5)
-end
-
--- name -> list box, row height in screen pixels, number of entries
-local function ListInfo(name)
-	if name == "ally" then return g.ally, S.px(ROW_H), #allies end
-	if name == "enemy" then return g.enemy, S.px(ROW_H), #enemies end
-	return g.unit, S.px(UNIT_LINE_H), #units
-end
-
-local function ScrollTo(name, my, grab)
-	local r, rowH, count = ListInfo(name)
-	local rows, maxFirst = ListRows(r, rowH, count)
-	if maxFirst == 0 then return end
-	local trackH = r.y2 - r.y1
-	local thumbH = max(S.px(16), trackH * rows / count)
-	local frac = (r.y2 - (my + grab)) / max(1, trackH - thumbH)
-	scroll[name] = floor(min(1, max(0, frac)) * maxFirst + 0.5)
-end
-
-function widget:IsAbove(mx, my)
-	return (WG.Slate == S and InWindow(mx, my)) or false
-end
-
-function widget:GetTooltip()
-	return ""
-end
-
-function widget:MousePress(mx, my, button)
-	if not open or WG.Slate ~= S or not wx1 then return false end
-	if not InWindow(mx, my) then return false end
-	if button ~= 1 then return true end
-	if closeRect and S.Inside(mx, my, closeRect[1], closeRect[2], closeRect[3], closeRect[4]) then
-		Close()
+function widget:KeyPress(key, mods, isRepeat)
+	if not document or isRepeat then
+		return false
+	end
+	if key == KEY_H then
+		Toggle()
 		return true
 	end
-	if not g then return true end
-
-	for i = 1, #g.sliders do
-		local s = g.sliders[i]
-		local slop = S.px(8)
-		if S.Inside(mx, my, s.x1 - slop, s.y1 - slop, s.x2 + slop, s.y2 + slop) then
-			drag = { slider = s.key }
-			amount[s.key] = SliderAmount(s, mx)
-			return true
-		end
-	end
-
-	-- scrollbars, then rows
-	for _, name in ipairs({ "ally", "enemy", "unit" }) do
-		local r, rowH, count = ListInfo(name)
-		if In(r, mx, my) then
-			local rows, maxFirst = ListRows(r, rowH, count)
-			if maxFirst > 0 and mx >= r.x2 - S.px(BAR_W) - 2 then
-				local trackH = r.y2 - r.y1
-				local thumbH = max(S.px(16), trackH * rows / count)
-				local ty2 = r.y2 - (trackH - thumbH) * (scroll[name] / maxFirst)
-				local grab = (my <= ty2 and my >= ty2 - thumbH) and (ty2 - my) or thumbH * 0.5
-				drag = { list = name, grab = grab }
-				ScrollTo(name, my, grab)
-			elseif name ~= "unit" then
-				local list = (name == "ally") and allies or enemies
-				local e = list[scroll[name] + floor((r.y2 - my) / rowH) + 1]
-				if e then
-					target = (target ~= e.teamID) and e.teamID or nil
-					notice = ""
-				end
-			end
-			return true
-		end
-	end
-
-	if In(g.check, mx, my) then
-		shareUnits = not shareUnits
-	elseif In(g.apply, mx, my) then
-		Apply()
-	elseif In(g.cancel, mx, my) then
-		Close()
-	end
-	return true
-end
-
-function widget:MouseMove(mx, my)
-	if not drag or not g then return false end
-	if drag.slider then
-		for i = 1, #g.sliders do
-			local s = g.sliders[i]
-			if s.key == drag.slider then amount[s.key] = SliderAmount(s, mx) end
-		end
-	else
-		ScrollTo(drag.list, my, drag.grab)
-	end
-	return true
-end
-
-function widget:MouseRelease()
-	drag = nil
-	return true
-end
-
-function widget:MouseWheel(up)
-	if not open or not g or WG.Slate ~= S then return false end
-	local mx, my = Spring.GetMouseState()
-	if not InWindow(mx, my) then return false end
-	for _, name in ipairs({ "ally", "enemy", "unit" }) do
-		local r, rowH, count = ListInfo(name)
-		if In(r, mx, my) then
-			local _, maxFirst = ListRows(r, rowH, count)
-			scroll[name] = min(maxFirst, max(0, scroll[name] + (up and -1 or 1)))
-		end
-	end
-	return true
-end
-
-function widget:KeyPress(key)
-	if open and key == 27 then   -- Esc
+	if isOpen and key == KEY_ESCAPE then
 		Close()
 		return true
 	end
 	return false
+end
+
+function widget:Update()
+	if not document then
+		return
+	end
+	if hud.FollowGuiHidden(document) or not isOpen then
+		dragging = nil
+		return
+	end
+	if dragging then
+		SlideTo(dragging) -- until RmlUi reports the release (see hud.OnDrag)
+		Refresh()
+		return
+	end
+	local now = Spring.GetTimer()
+	if Spring.DiffTimers(now, lastUpdate) >= UPDATE_INTERVAL then
+		lastUpdate = now
+		Refresh()
+	end
 end
