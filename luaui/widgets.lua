@@ -103,6 +103,12 @@ widgetHandler = {
   yViewSizeOld = 1,
 }
 
+-- The shared table is also a LuaUI global, as it is in the BAR and Splinter
+-- Faction handlers. Recoil's RmlUi binding runs every Lua event listener in
+-- the document's environment (built from LuaUI's globals, not the widget's
+-- sandbox), so a listener that reads WG only finds it here.
+WG = widgetHandler.WG
+
 
 -- these call-ins are set to 'nil' if not used
 -- they are setup in UpdateCallIns()
