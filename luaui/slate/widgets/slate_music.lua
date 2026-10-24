@@ -1,14 +1,28 @@
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
+
+function widget:GetInfo()
+	return {
+		name    = "Slate Music",
+		desc    = "Plays the soundtrack by artist, shuffled, with random silences; controls in the game menu and options",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
+		layer   = -3,
+		enabled = true,
+	}
+end
+
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Music player. Plays the tracks under Music/<artist>/ in a shuffled order
---  that gets through every track before repeating, with a random stretch of
---  silence between some of them. No war meters, no mood folders: one
---  playlist, chosen by artist (or all of them).
+--  Music player. Plays the tracks under <dir>/<artist>/ for each folder in
+--  MUSIC_DIRS, in a shuffled order that gets through every track before
+--  repeating, with a random stretch of silence between some of them. No war
+--  meters, no mood folders: one playlist, chosen by artist (or all of them).
 --
 --  Volume: snd_volmusic, 20% by default, applied to every track as it starts
---  (and to the one the loading screen started, which this widget picks up
---  rather than cutting off).
+--  (and to a track the loading screen left running, which this widget lets
+--  finish rather than cutting off).
 --
 --  Controls live in the game menu (now playing, previous, pause, next) and in
 --  Options > Sound. Other widgets use WG.SlateMusic:
@@ -17,41 +31,26 @@
 --    GetArtists() -> list of {folder, name}; GetArtist(), SetArtist(folder or "")
 --    SetMusicVolume(percent)
 --
---  Replaces gui_musicplayer.lua (Damgam's BAR player, kept in
---  Widgets/disabled/).
---
+--  No RmlUi document: this widget has nothing to draw.
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
-
-function widget:GetInfo()
-	return {
-		name    = "Slate Music",
-
-		desc    = "Plays the soundtrack by artist, shuffled, with random silences; controls in the game menu and options",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-19",
-		license = "GNU GPL, v2 or later",
-		layer   = -3,
-		enabled = true,
-	}
-end
 
 --------------------------------------------------------------------------------
 -- config
 --------------------------------------------------------------------------------
 
-local MUSIC_DIR   = "music"
+-- Where the tracks are: each folder is scanned for <artist>/ subfolders, and
+-- loose files straight in it count as one artist, "Various". A game keeps its
+-- music in whichever of these it likes.
+local MUSIC_DIRS  = { "music", "sounds/music" }
 local EXTENSIONS  = "{*.ogg,*.mp3}"
 local DEFAULT_VOLUME = 20       -- percent, snd_volmusic when unset
 
--- config keys (shared with LuaIntro/Addons/music.lua and the options)
+-- config keys (shared with the options)
 local CFG_ARTIST       = "music_artist"            -- folder name, "" for all
-local DEFAULT_ARTIST   = "elevenlabs"              -- when nothing is chosen yet; "" for all
+local DEFAULT_ARTIST   = ""                        -- when nothing is chosen yet: all
 local CFG_SILENCE_MAX  = "music_silence_max"       -- seconds, 0 for none
 local CFG_SILENCE      = "UseSoundtrackSilenceTimer"
 local CFG_FADES        = "UseSoundtrackFades"
-local CFG_LOADSCREEN   = "music_loadscreen"
-local CFG_LOAD_TRACK   = "music_loadscreen_track"  -- set by the loading screen
 
 local SILENCE_CHANCE  = 0.5     -- a gap after a track is a silence this often
 local SILENCE_MIN     = 8       -- a silence is at least this long (seconds)
@@ -110,8 +109,9 @@ local function TitleOf(path, artistName)
 	return title
 end
 
-local function ArtistName(folder)
-	local custom = MUSIC_DIR .. "/" .. folder .. "/artist.txt"
+-- an artist folder may name itself in artist.txt
+local function ArtistName(dir, folder)
+	local custom = dir .. "/" .. folder .. "/artist.txt"
 	if VFS.FileExists(custom) then
 		local name = (VFS.LoadFile(custom) or ""):match("^%s*(.-)%s*$")
 		if name ~= "" then return name end
@@ -119,28 +119,42 @@ local function ArtistName(folder)
 	return (folder:gsub("^%l", string.upper))
 end
 
+-- The same folder name under two music dirs is one artist. The key is the
+-- folder name, so the saved choice (CFG_ARTIST) does not depend on the dir.
+local function AddTracks(folder, name, tracks)
+	local entry = artistByFolder[folder]
+	if not entry then
+		entry = { folder = folder, name = name, tracks = {} }
+		artists[#artists + 1] = entry
+		artistByFolder[folder] = entry
+	end
+	for _, t in ipairs(tracks) do
+		entry.tracks[#entry.tracks + 1] = t
+	end
+end
+
 local function Scan()
 	artists, artistByFolder = {}, {}
-	for _, dir in ipairs(VFS.SubDirs(MUSIC_DIR .. "/", "*") or {}) do
-		local folder = dir:gsub("[/\\]+$", ""):match("[^/\\]+$")
-		if folder then
-			local tracks = VFS.DirList(MUSIC_DIR .. "/" .. folder, EXTENSIONS) or {}
-			if #tracks > 0 then
-				table.sort(tracks)
-				local entry = { folder = folder, name = ArtistName(folder), tracks = tracks }
-				artists[#artists + 1] = entry
-				artistByFolder[folder] = entry
+	for _, dir in ipairs(MUSIC_DIRS) do
+		for _, sub in ipairs(VFS.SubDirs(dir .. "/", "*") or {}) do
+			local folder = sub:gsub("[/\\]+$", ""):match("[^/\\]+$")
+			if folder then
+				local tracks = VFS.DirList(dir .. "/" .. folder, EXTENSIONS) or {}
+				if #tracks > 0 then
+					AddTracks(folder, ArtistName(dir, folder), tracks)
+				end
 			end
 		end
+		-- loose files straight in the dir count as one unnamed artist
+		local loose = VFS.DirList(dir, EXTENSIONS) or {}
+		if #loose > 0 then
+			AddTracks(".", "Various", loose)
+		end
+	end
+	for _, a in ipairs(artists) do
+		table.sort(a.tracks)
 	end
 	table.sort(artists, function(a, b) return a.name < b.name end)
-	-- loose files straight in Music/ count as one unnamed artist
-	local loose = VFS.DirList(MUSIC_DIR, EXTENSIONS) or {}
-	if #loose > 0 then
-		local entry = { folder = ".", name = "Various", tracks = loose }
-		artists[#artists + 1] = entry
-		artistByFolder["."] = entry
-	end
 end
 
 local function Pool()
@@ -299,21 +313,10 @@ end
 -- widget api
 --------------------------------------------------------------------------------
 
-local function TrackFromPath(path)
-	for _, a in ipairs(artists) do
-		for _, t in ipairs(a.tracks) do
-			if t == path then
-				return { path = t, artist = a.name, title = TitleOf(t, a.name) }
-			end
-		end
-	end
-	return nil
-end
-
 function widget:Initialize()
 	Scan()
 	if #artists == 0 then
-		spEcho("[Music] nothing under " .. MUSIC_DIR .. "/, removing widget")
+		spEcho("[Slate Music] no tracks under " .. table.concat(MUSIC_DIRS, "/ or ") .. "/, removing widget")
 		widgetHandler:RemoveWidget(self)
 		return
 	end
@@ -323,24 +326,19 @@ function widget:Initialize()
 	end
 	Refill()
 
-	-- the loading screen may have started a track: carry on with it
+	-- The loading screen may have left a stream running: let it finish at the
+	-- user's volume. Its file is not known here, so it is not put in the
+	-- history (Previous cannot go back to it) and the playlist starts after it.
 	local played, total = spGetStreamTime()
-	local loadTrack = spGetConfigString(CFG_LOAD_TRACK, "")
-	if loadTrack ~= "" and total and total > 0 and played and played < total - END_SLACK then
-		current = TrackFromPath(loadTrack) or { path = loadTrack, artist = "", title = TitleOf(loadTrack, "") }
+	if total and total > 0 and played and played < total - END_SLACK then
+		current = { artist = "", title = "Loading screen music" }
 		playing = true
 		paused = false
 		volumeScale = 1
-		ApplyVolume() -- at the user's volume, whatever the loading screen used
-		PushHistory(current)
-		-- keep it out of this round's draw
-		for i = #bag, 1, -1 do
-			if bag[i].path == current.path then table.remove(bag, i) end
-		end
+		ApplyVolume()
 	else
 		StartTrack(Draw(), true)
 	end
-	spSetConfigString(CFG_LOAD_TRACK, "")
 
 	WG.SlateMusic = {
 		GetStatus = function()

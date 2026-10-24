@@ -1,13 +1,28 @@
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
+
+function widget:GetInfo()
+	return {
+		name    = "Slate Hotbind",
+		desc    = "Hover a build or order button and press Ctrl+Insert to bind it to a key; Ctrl+Delete to unbind. Writes through the Slate Keybinds widget.",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
+		layer   = -110, -- ahead of Keybinds (-100) so capture wins the key
+		enabled = true,
+	}
+end
+
 --------------------------------------------------------------------------------
 --
---  Hotbind of the RmlUi HUD: bind a build or order button to a key by
---  pointing at it.
+--  Hotbind: bind a build or order button to a key by pointing at it.
 --
 --  Hover any button in the build or order menu and press Ctrl+Insert. A prompt
 --  appears, the next key you press becomes that button's binding, and the
---  change is written to sf_uikeys.txt at once. Ctrl+Delete over the same
---  button removes its binding. Esc or a click cancels the prompt.
+--  change is written to the player's key file (WG.SlateKeybindings.userFile)
+--  at once. Ctrl+Delete over the same button removes its binding. Esc or a
+--  click cancels the prompt.
 --
 --  Two things make this correct rather than approximate:
 --
@@ -17,38 +32,20 @@
 --      plain verbs like "reclaim" or "guard" for orders.
 --      CGuiHandler::SetActiveCommand matches a pressed keyset's action against
 --      cmdDesc.action and nothing else, so reading .action straight off the
---      hovered button is exactly right.
+--      hovered button is exactly right. The build menu publishes it twice:
+--      the whole command through WG.SlateCommands.GetHovered(), and just the
+--      action and a label through WG.Slate.hoverAction, which any other panel
+--      with bindable buttons can set too.
 --
---    * sf_uikeys.txt has exactly one writer. This widget never opens that
+--    * The key file has exactly one writer. This widget never opens that
 --      file; it calls WG.SlateKeybinds.Bind / .Unbind so the change joins the
 --      same edit list the keybinds window holds in memory. Hotbinds therefore
 --      show up in that window, can be removed there, and are cleared by Reset
 --      All Rebinds.
 --
 --  It costs next to nothing while idle: nothing is polled, and the hovered
---  button is asked for (WG.SlateCommands.GetHovered) only when one of
---  the two keys is actually pressed.
+--  button is asked for only when one of the two keys is actually pressed.
 --
---  Replaces gui_static_hotbind.lua (kept in Widgets/disabled/).
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
-
-function widget:GetInfo()
-	return {
-		name    = "Slate Hotbind",
-
-		desc    = "Hover a build or order button and press Ctrl+Insert to bind it to a key; Ctrl+Delete to unbind. Writes through the Keybinds widget. ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-13",
-		license = "GNU GPL, v2 or later",
-		layer   = -110, -- ahead of Keybinds (-100) so capture wins the key
-		enabled = true,
-	}
-end
-
---------------------------------------------------------------------------------
--- config
 --------------------------------------------------------------------------------
 
 local DOCUMENT_PATH = "hotbind.rml"
@@ -66,11 +63,11 @@ local PANEL_HEIGHT = 78
 -- the bottom. 0.62 is clear of the build menu on the left and the tooltip.
 local PANEL_Y_FRAC = 0.62
 
-local LAYOUT_NAME = "hotbind" -- same as the old widget, so a saved position carries over
+local LAYOUT_NAME = "slate_hotbind"
 
 local spGetKeySymbol = Spring.GetKeySymbol
 
-local hud
+local hud, S
 local document
 local view
 
@@ -117,10 +114,6 @@ local function SetStatus(title, detail, kind)
 	status = {title = title, detail = detail, kind = kind, expires = os.clock() + STATUS_TIME}
 end
 
-local function PlayClickSound()
-	Spring.PlaySoundFile("leftclick", 1.0, "ui")
-end
-
 --------------------------------------------------------------------------------
 -- what is under the mouse
 --------------------------------------------------------------------------------
@@ -151,26 +144,35 @@ local function CommandLabel(cmd)
 	return cmd.action or "?"
 end
 
--- Returns cmd, label, action -- or nil plus a reason string to show the user.
+-- Returns label, action for the button under the mouse; nil, reason when
+-- there is one but it cannot be bound; nil, nil when nothing is hovered.
 local function HoveredBindable()
+	local hover = S.hoverAction
 	local api = WG.SlateCommands
-	if not api or not api.GetHovered then
-		return nil, "build menu not available"
+	if api and api.GetHovered then
+		local cmd = api.GetHovered()
+		if not cmd then
+			return nil, nil -- nothing hovered: stay silent, pass the key through
+		end
+		local action = cmd.action
+		if type(action) ~= "string" or action == "" then
+			-- Lua-injected custom commands have no engine action, so there is
+			-- nothing a keyset could be matched against.
+			return nil, "\"" .. CommandLabel(cmd) .. "\" has no bindable action"
+		end
+		-- the menu's own label for the button, when it is talking about the
+		-- same command; the unit or command name otherwise
+		local label = (hover and hover.action == action and hover.label) or CommandLabel(cmd)
+		return label, action
 	end
 
-	local cmd = api.GetHovered()
-	if not cmd then
-		return nil, nil -- nothing hovered: stay silent, pass the key through
+	-- Without the build menu, the shared hover state is all there is. It says
+	-- nothing while the mouse is off every button, which reads as nothing
+	-- hovered.
+	if hover and type(hover.action) == "string" and hover.action ~= "" then
+		return hover.label or hover.action, hover.action
 	end
-
-	local action = cmd.action
-	if type(action) ~= "string" or action == "" then
-		-- Lua-injected custom commands have no engine action, so there is
-		-- nothing a keyset could be matched against.
-		return nil, "\"" .. CommandLabel(cmd) .. "\" has no bindable action"
-	end
-
-	return cmd, CommandLabel(cmd), action
+	return nil, nil
 end
 
 --------------------------------------------------------------------------------
@@ -178,9 +180,9 @@ end
 --------------------------------------------------------------------------------
 
 local function BeginCapture()
-	local cmd, label, action = HoveredBindable()
-	if not cmd then
-		if label then -- second return is the reason string in the failure case
+	local label, action = HoveredBindable()
+	if not action then
+		if label then -- the reason string in the failure case
 			SetStatus("Cannot bind", label, "err")
 			return true
 		end
@@ -188,7 +190,7 @@ local function BeginCapture()
 	end
 
 	if not (WG.SlateKeybinds and WG.SlateKeybinds.Bind) then
-		SetStatus("Cannot bind", "Keybinds widget is not running", "err")
+		SetStatus("Cannot bind", "Slate Keybinds widget is not running", "err")
 		return true
 	end
 
@@ -229,13 +231,13 @@ local function FinishCapture(keyset)
 		detail = detail .. ")"
 	end
 
-	PlayClickSound()
+	hud.Sound("click")
 	SetStatus(keyset, detail, "ok")
 end
 
 local function ClearHovered()
-	local cmd, label, action = HoveredBindable()
-	if not cmd then
+	local label, action = HoveredBindable()
+	if not action then
 		if label then
 			SetStatus("Cannot unbind", label, "err")
 			return true
@@ -244,7 +246,7 @@ local function ClearHovered()
 	end
 
 	if not (WG.SlateKeybinds and WG.SlateKeybinds.Unbind) then
-		SetStatus("Cannot unbind", "Keybinds widget is not running", "err")
+		SetStatus("Cannot unbind", "Slate Keybinds widget is not running", "err")
 		return true
 	end
 
@@ -254,7 +256,7 @@ local function ClearHovered()
 		return true
 	end
 
-	PlayClickSound()
+	hud.Sound("click")
 	SetStatus("Unbound " .. table.concat(removed, ", "), label, "warn")
 	return true
 end
@@ -283,10 +285,15 @@ local function Place()
 end
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Hotbind] " .. tostring(reason))
+		Spring.Echo("[Slate Hotbind] " .. tostring(reason))
 		widgetHandler:RemoveWidget()
 		return
 	end
@@ -296,10 +303,6 @@ function widget:Initialize()
 	view = hud.NewView(document)
 	view.Assume("hotbind", "hidden", true) -- set in the markup
 
-	if not (WG.SlateCommands and WG.SlateCommands.GetHovered) then
-		Spring.Echo("[Hotbind] build/order menu hover API not found - hotbinding disabled until it loads")
-	end
-
 	-- The build/order menu calls Cancel when it is clicked while the prompt is
 	-- up: a click on an RmlUi panel never reaches this widget's MousePress.
 	WG.SlateHotbind = {
@@ -308,6 +311,7 @@ function widget:Initialize()
 	}
 
 	hud.RegisterPanel(LAYOUT_NAME, "Hotbind Prompt", Place, function() return capture ~= nil end)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 	hud.ShowPassive(document)
 end
@@ -317,9 +321,8 @@ function widget:Shutdown()
 	ReleaseKeys()
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end

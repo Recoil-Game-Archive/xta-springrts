@@ -1,9 +1,23 @@
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
+
+function widget:GetInfo()
+	return {
+		name    = "Slate Ranks",
+		desc    = "Per-match rank tracks: the strip and the rank-up card",
+		author  = "Scary le Poo; SplinterFaction Team",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
+		layer   = -1990,
+		enabled = true,
+	}
+end
+
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Rank tracks of the RmlUi HUD. The game_rank_tracks gadget counts four
---  things per team (metal destroyed, sustained income, metal built,
---  extractors held) and hands out cosmetic ranks. This widget shows them:
+--  Rank tracks. A gadget counts a few things per team (metal destroyed,
+--  sustained income, metal built, extractors held) and hands out cosmetic
+--  ranks. This widget shows them:
 --
 --    the strip, top right: the viewed team's rank on each track with a bar
 --    to the next one, read from the team rules params the gadget publishes;
@@ -16,42 +30,53 @@
 --  Players only: a spectator sees nothing of it, and neither does a replay.
 --  Nothing here affects play. The widget can be switched off in Options.
 --
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
-
-function widget:GetInfo()
-	return {
-		name    = "Slate Ranks",
-		desc    = "Per-match rank tracks: the strip and the rank-up card ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-19",
-		license = "GNU GPL, v2 or later",
-		layer   = -1990,
-		enabled = true,
-	}
-end
-
---------------------------------------------------------------------------------
--- config
+--  WHAT A GAME MUST PROVIDE
+--
+--  A game without a rank gadget need do nothing: the widget sees no rank
+--  params and removes itself quietly. A game that wants ranks provides:
+--
+--    the track config, luaui/slate/configs/slate_ranks.lua (a game's own
+--    copy in luaui/configs/ wins): tracks = { {id=, name=, unit=, thresholds=,
+--    titles=}, ... } and optionally upgrades = { {id=, name=, param=, effect=,
+--    mults=, titles=}, ... }. The gadget should read the same file;
+--
+--    a gadget (game_rank_tracks.lua in Splinter Faction) that, for every
+--    player team, sets the team rules params rank_<track id>_level and
+--    rank_<track id>_value (from its Initialize on, so a reload finds them);
+--    scales the "territory" track to the map and publishes the result as the
+--    game rules params rank_territory_t<rank>; and on each rank reached
+--    calls the unsynced global RankUpEvent(teamID, trackIndex, level, value)
+--    in LuaUI (Script.LuaUI.RankUpEvent);
+--
+--    an emblem per track and upgrade, luaui/slate/images/rank_<id>.png,
+--    and rank_chevron.png / rank_chevron_ember.png for the tally
+--    (premultiplied alpha, see theme.rcss);
+--
+--    optionally a sound: "rankup" in the sounds table of slate_game.lua, or
+--    "rankup1".."rankup5" for one per rank. No entry means silence.
+--
+--  An upgrade (from an upgrades gadget mirroring upgrade_<id>_level team
+--  rules params) gets a card too, though no place in the strip.
 --------------------------------------------------------------------------------
 
 local DOCUMENT_PATH = "ranks.rml"
-local CONFIG_PATH   = "LuaRules/Configs/rank_tracks.lua"
+local CONFIG_FILE   = "slate_ranks.lua"
+-- a game's own copy in luaui/configs/ wins, as with the other Slate configs
+local CONFIG_DIRS   = { LUAUI_DIRNAME .. "configs/", LUAUI_DIRNAME .. "slate/configs/" }
 
 -- must match #ranks and #rankup in ranks.rml
 local STRIP_WIDTH  = 250
 local STRIP_HEIGHT = 160
-local STRIP_GAP    = 8    -- between the menu button and the strip
--- the menu button's place, so the strip sits under it, right-aligned with
--- it: must match BUTTON_HEIGHT and MARGIN in gui_bastion_menu.lua
+-- the menu button's height, so the strip sits under it, right-aligned with
+-- it: must match BUTTON_HEIGHT in slate_menu.lua
 local MENU_BUTTON_HEIGHT = 30
-local MENU_BUTTON_MARGIN = 10
 local CARD_WIDTH   = 320
 local CARD_HEIGHT  = 252
-local CARD_TOP     = 92   -- below the resource bar, where the vote window goes
+-- the card goes below the resource bar: must match BAR_HEIGHT in slate_resourcebar.lua
+local RESBAR_HEIGHT = 64
 
-local LAYOUT_STRIP = "ranks"
-local LAYOUT_CARD  = "rankup"
+local LAYOUT_STRIP = "slate_ranks"
+local LAYOUT_CARD  = "slate_rankup"
 
 -- the card's timing, in seconds
 local SLAM_TIME   = 0.22  -- coming in: from oversized and clear to in place
@@ -62,14 +87,6 @@ local FADE_STEPS  = 20    -- opacity moves in this many steps (as the pause bann
 
 local STRIP_PERIOD = 15   -- frames between strip refreshes; matches the gadget
 
--- a sound per rank; file paths, as Spring.PlaySoundFile takes them
-local SOUNDS = {
-	"sounds/ui/rankup/SD_Low+Hi_01.wav",
-	"sounds/ui/rankup/SD_Low+Hi_01.wav",
-	"sounds/ui/rankup/SD_Low+Hi_04.wav",
-	"sounds/ui/rankup/SD_Low+Hi_04.wav",
-	"sounds/ui/rankup/SD_Low+Hi_06.wav",
-}
 local SOUND_VOLUME = 0.8
 
 local ROMAN = {"I", "II", "III", "IV", "V"}
@@ -78,13 +95,15 @@ local ROMAN = {"I", "II", "III", "IV", "V"}
 -- state
 --------------------------------------------------------------------------------
 
-local hud
+local hud, S
 local document
 local view
 
-local tracks = {}  -- from the config: id, name, unit, thresholds, titles
+local tracks = {}    -- from the config: id, name, unit, thresholds, titles
+local upgrades = {}  -- from the config: id, name, param, effect, mults, titles
+local upgradeLevels  -- last seen level per upgrade, nil until the first poll
 
-local queue = {}   -- rank-ups waiting to be shown: {track, level, value}
+local queue = {}   -- rank-ups waiting to be shown: {track, level, value} or {upgrade, level}
 local card  = nil  -- the one being shown: {track, level, value, t0}
 local cardShownAt = -1 -- when the last card ended, for the gap
 
@@ -118,25 +137,13 @@ local function Short(n)
 	return string.format("%.1f", n)
 end
 
-local function WithCommas(n)
-	local s = tostring(math.floor(n + 0.5))
-	while true do
-		local replaced
-		s, replaced = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
-		if replaced == 0 then
-			break
-		end
-	end
-	return s
-end
-
 -- what the card says under the title, in the track's own units
 local function Achievement(track, value)
 	if track.unit == "metal" then
 		if track.id == "combat" then
-			return WithCommas(value) .. " metal of enemy units destroyed"
+			return hud.Number(value) .. " metal of enemy units destroyed"
 		end
-		return WithCommas(value) .. " metal of units built"
+		return hud.Number(value) .. " metal of units built"
 	elseif track.unit == "income" then
 		return "+" .. Short(value) .. " sustained income"
 	elseif track.unit == "extractors" then
@@ -178,6 +185,48 @@ local function TeamParam(teamID, name)
 	return (Spring.GetTeamRulesParam(teamID, name))
 end
 
+-- true when some team carries the gadget's rank params: the gadget is there
+local function GadgetPresent()
+	local first = tracks[1]
+	if not first then
+		return false
+	end
+	for _, teamID in ipairs(Spring.GetTeamList()) do
+		if TeamParam(teamID, "rank_" .. first.id .. "_level") ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
+local function LoadConfig()
+	for _, dir in ipairs(CONFIG_DIRS) do
+		local path = dir .. CONFIG_FILE
+		if VFS.FileExists(path) then
+			local ok, config = pcall(VFS.Include, path)
+			if ok and type(config) == "table" and type(config.tracks) == "table" then
+				return config
+			end
+			Spring.Echo("[Slate Ranks] could not read " .. path)
+			return nil
+		end
+	end
+	return nil
+end
+
+-- a file in luaui/slate/images/; the leading slash makes the path absolute
+-- instead of relative to the document
+local function ImagePath(file)
+	return "/" .. hud.IMAGE_DIR .. file
+end
+
+-- one sound per rank when the game names them, else the one "rankup"
+local function RankSound(level)
+	local sounds = S.game.sounds or {}
+	local perRank = "rankup" .. level
+	hud.Sound(sounds[perRank] and perRank or "rankup", SOUND_VOLUME)
+end
+
 --------------------------------------------------------------------------------
 -- the strip
 --------------------------------------------------------------------------------
@@ -188,7 +237,7 @@ local function ReadTerritoryThresholds()
 	if territoryRead then
 		return
 	end
-	for i, track in ipairs(tracks) do
+	for _, track in ipairs(tracks) do
 		if track.id == "territory" then
 			local thresholds = {}
 			for rank = 1, #track.thresholds do
@@ -287,16 +336,16 @@ local function FillCard(entry)
 	view.SetText("rankup-sub", hud.Escape(sub))
 	local emblem = view.Element("rankup-emblem")
 	if emblem then
-		emblem:SetAttribute("src", "/LuaUI/Images/rml/rank_" .. id .. ".png")
+		emblem:SetAttribute("src", ImagePath("rank_" .. id .. ".png"))
 	end
 	local tier = math.min(level, 5) -- the frame has five looks; upgrades go to six
 	for t = 1, 5 do
 		view.SetClass("rankup-frame", "t" .. t, t == tier)
 	end
-	local chevron = level >= 5 and "rank_chevron_ember.png" or "rank_chevron.png"
+	local chevron = ImagePath(level >= 5 and "rank_chevron_ember.png" or "rank_chevron.png")
 	local rml = {}
 	for _ = 1, level do
-		rml[#rml + 1] = '<img src="/LuaUI/Images/rml/' .. chevron .. '"/>'
+		rml[#rml + 1] = '<img src="' .. chevron .. '"/>'
 	end
 	local tally = view.Element("rankup-chevrons")
 	if tally then
@@ -312,10 +361,7 @@ local function StartCard(entry)
 		fresh = entry.track
 		freshUntil = card.t0 + HOLD_TIME + FADE_TIME + 6
 	end
-	local sound = SOUNDS[math.min(entry.level, #SOUNDS)]
-	if sound then
-		Spring.PlaySoundFile(sound, SOUND_VOLUME, "ui")
-	end
+	RankSound(entry.level)
 	pcall(function() document:PullToFront() end)
 	view.SetClass("rankup", "hidden", false)
 	lastStripFrame = -1 -- so the strip shows the new rank at once
@@ -366,38 +412,46 @@ end
 --------------------------------------------------------------------------------
 
 local function StripOrigin(vsx, vsy, w, h, scale)
-	local x = vsx - MENU_BUTTON_MARGIN * scale - w
-	return x, vsy - (MENU_BUTTON_MARGIN + MENU_BUTTON_HEIGHT + STRIP_GAP) * scale - h
+	local margin = hud.Margin() * scale
+	return vsx - margin - w, vsy - margin - (MENU_BUTTON_HEIGHT + hud.Gap()) * scale - h
 end
 
 local function CardOrigin(vsx, vsy, w, h, scale)
-	return (vsx - w) * 0.5, vsy - CARD_TOP * scale - h
+	return (vsx - w) * 0.5, vsy - (hud.Margin() + RESBAR_HEIGHT + hud.Gap()) * scale - h
 end
 
 local function Place()
 	hud.PlacePanel(view.Element("ranks"), LAYOUT_STRIP, STRIP_WIDTH, STRIP_HEIGHT, StripOrigin)
 	hud.PlacePanel(view.Element("rankup"), LAYOUT_CARD, CARD_WIDTH, CARD_HEIGHT, CardOrigin)
 	view.ForgetStyles()
+	-- the card's border follows the accent, tint included
+	view.SetStyle("rankup", "border-color", S.AccentColor())
 end
 
 function widget:Initialize()
-	if Spring.IsReplay() then
+	S = WG.Slate
+	if not S or Spring.IsReplay() then
 		widgetHandler:RemoveWidget(self)
 		return
 	end
-	local ok, config = pcall(VFS.Include, CONFIG_PATH)
-	if not ok or type(config) ~= "table" or type(config.tracks) ~= "table" then
-		Spring.Echo("[Bastion Ranks] could not read " .. CONFIG_PATH)
+	local config = LoadConfig()
+	if not config then
 		widgetHandler:RemoveWidget(self)
 		return
 	end
 	tracks = config.tracks
 	upgrades = config.upgrades or {}
 
+	-- no rank params on any team: the game has no rank gadget
+	if not GadgetPresent() then
+		widgetHandler:RemoveWidget(self)
+		return
+	end
+
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Bastion Ranks] " .. tostring(reason))
+		Spring.Echo("[Slate Ranks] " .. tostring(reason))
 		widgetHandler:RemoveWidget(self)
 		return
 	end
@@ -416,6 +470,7 @@ function widget:Initialize()
 
 	hud.RegisterPanel(LAYOUT_STRIP, "Ranks", Place)
 	hud.RegisterPanel(LAYOUT_CARD, "Rank-up", Place, function() return card ~= nil end)
+	hud.OnChange(LAYOUT_STRIP, Place)
 	Place()
 	hud.ShowPassive(document)
 	viewedTeam = Spring.GetMyTeamID()
@@ -428,9 +483,8 @@ function widget:Shutdown()
 	if hud then
 		hud.UnregisterPanel(LAYOUT_STRIP)
 		hud.UnregisterPanel(LAYOUT_CARD)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_STRIP)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end

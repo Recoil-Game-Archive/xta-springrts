@@ -5,7 +5,7 @@
 	<style>
 		/* The prompt that asks for a key, and then says what happened. Its
 		   position is set from Lua (hud.PlacePanel); its size here must match
-		   PANEL_WIDTH and PANEL_HEIGHT in gui_bastion_hotbind.lua. It never takes
+		   PANEL_WIDTH and PANEL_HEIGHT in slate_hotbind.lua. It never takes
 		   the mouse. */
 		#hotbind {
 			position: absolute;
@@ -26,7 +26,7 @@
 			font-weight: bold;
 			font-size: 17dp;
 			line-height: 21dp;
-			color: #f2d64b;
+			color: #a9bdd0;
 			white-space: nowrap;
 			overflow: hidden;
 		}
