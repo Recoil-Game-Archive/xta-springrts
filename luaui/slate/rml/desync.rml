@@ -20,6 +20,7 @@
 			padding: 11dp 14dp 12dp 16dp;
 			background-color: rgba(30, 10, 10, 240);
 			border: 2dp #ffb3a6;
+			border-radius: 8dp;
 			pointer-events: auto;
 		}
 		/* the first seconds, to catch the eye */
@@ -40,6 +41,7 @@
 			letter-spacing: 2dp;
 			color: #0d0e10;
 			background-color: #ffb3a6;
+			border-radius: 3dp;
 		}
 		#desync-state {
 			margin-left: 10dp;
@@ -99,6 +101,7 @@
 			color: #f4f5f7;
 			background-color: rgba(120, 28, 24, 235);
 			border: 1dp #ffb3a6;
+			border-radius: 5dp;
 			pointer-events: auto;
 		}
 		#desync-chip:hover {

@@ -1,32 +1,13 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Faction chooser of the RmlUi HUD: the screen before the game proper, where
---  each player picks a faction. The choice is sent to the game_spawn gadget.
---
---  The screen is dimmed, with one card per faction and a countdown above
---  them. A click on a card is final. A player who has not chosen when the
---  time runs out gets a faction at random. Spectators see the dim, the
---  heading and the countdown only.
---
---  The countdown is driven by game frames, not the wall clock, so it respects
---  game speed and pause. The gadget broadcasts the real deadline in the
---  "factionDeadlineFrame" game rules param (it is shortened once everyone has
---  chosen) and the current phase in "phase"; the widget removes itself when
---  the phase is no longer "faction".
---
---  Replaces gui_static_factionchooser.lua (kept in Widgets/disabled/).
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Faction Chooser",
-
-		desc    = "Pregame faction choice; sends the choice to the game_spawn gadget ",
+		desc    = "Pregame faction choice; sends the choice to the game_spawn gadget",
 		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-13",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = 2000, -- the placement widget keeps everything at 1800 and up running in pregame
 		enabled = true,
@@ -34,54 +15,78 @@ function widget:GetInfo()
 end
 
 --------------------------------------------------------------------------------
--- config
+--  The screen before the game proper, where each player picks a faction. The
+--  screen is dimmed, with one card per faction and a countdown above them. A
+--  click on a card is final. A player who has not chosen when the time runs
+--  out gets a faction at random. Spectators see the dim, the heading and the
+--  countdown only.
+--
+--  The countdown is driven by game frames, not the wall clock, so it respects
+--  game speed and pause. The gadget broadcasts the real deadline (it is
+--  shortened once everyone has chosen) and the current phase; the widget
+--  removes itself when the phase is no longer "faction".
+--
+--  WHAT A GAME MUST PROVIDE
+--
+--  This widget is kept for games that have a faction choice; a game without
+--  one need do nothing, the widget removes itself quietly. A game that wants
+--  it provides:
+--
+--    a gadget (game_spawn in Splinter Faction) that
+--      - sets the game rules param "phase" to "faction" while the choice is
+--        open and to anything else ("placement", "done") once it is over;
+--      - sets "factionDeadlineFrame" to the game frame the choice closes at;
+--      - listens in RecvLuaMsg for a message of SPAWN_MSG_BYTE followed by the
+--        unitDefID of the chosen faction's commander, and spawns that;
+--
+--    the faction list, in slate_game.lua:
+--      factions = {
+--        { id = "<commander unit name>", name = "Faction", blurb = "A line or
+--          two about it.", picture = "<image path>", color = "#rrggbb" },
+--        ...
+--      }
+--      id is the unitDef name of the commander the gadget is to spawn; picture
+--      is a file path from the game root (shown 392x220 dp, premultiplied
+--      alpha, see theme.rcss); color is optional and tints the card's top line
+--      and chosen border, the Slate accent otherwise.
+--
+--  Without a factions table the widget removes itself in Initialize; without
+--  the gadget's "phase" param it waits only until the game starts, then goes.
+--
+--  While the chooser is on screen it sets WG.SlatePregame, which hides the
+--  rest of the HUD (see hud.FollowGuiHidden in core.lua).
 --------------------------------------------------------------------------------
 
 local DOCUMENT_PATH = "factionchooser.rml"
 
--- the byte game_spawn.lua's RecvLuaMsg listens for
+-- the byte the spawn gadget's RecvLuaMsg listens for
 local SPAWN_MSG_BYTE = "\138"
 
--- must match #chooser in factionchooser.rml: two cards of 420 and the 40 between
-local GROUP_WIDTH  = 880
+-- must match .card and .card.second in factionchooser.rml: cards of 420
+-- with 40 between
+local CARD_WIDTH   = 420
+local CARD_GAP     = 40
 local GROUP_HEIGHT = 500
 
-local LAYOUT_NAME = "factionchooser" -- same as the old widget, so a saved position carries over
+local LAYOUT_NAME = "slate_factionchooser"
 
 local DEADLINE_FRAME    = 900 -- fallback, matching CHOICE_TIMEOUT_FRAMES in game_spawn.lua
 local COUNTDOWN_TOTAL   = 30  -- seconds the full bar stands for
 local COUNTDOWN_BEEP_AT = 10  -- tick sound, and red, for the last seconds
 
-local BORDER_IDLE = "#232d38"
+local BORDER_IDLE = "rgba(255,255,255,60)"
 
--- accent: the faction's color, for the line on top of its card and the card's
--- border while the mouse is on it or it has been chosen
-local FACTION_DATA = {
-	{
-		commName    = "fedcommander",
-		heroImg     = "unitpics-hero/fedcommander_up1-hero.png",
-		label       = "Federation of Kala",
-		description = [[Fast, aggressive, and relentless. They favor mobility and area-of-effect firepower, using walkers, missiles, and plasma cannons to overwhelm enemies. Instead of shields, they have rapid hull regeneration, allowing them to recover between fights. Their cloaking technology makes them unpredictable, striking from unexpected angles.]],
-		accent      = "#2e85fa",
-	},
-	{
-		commName    = "lozcommander",
-		heroImg     = "unitpics-hero/lozcommander_up1-hero.png",
-		label       = "Loz Alliance",
-		description = [[Slow, heavily shielded, and hard-hitting. Their massive tanks dominate the battlefield with long-range firepower, relying on personal energy shields that regenerate quickly after combat. While their units lack innate health regeneration, their shields and defensive structures keep them standing.]],
-		accent      = "#d93838",
-	},
-}
-
-local spPlaySoundFile   = Spring.PlaySoundFile
 local spSendLuaRulesMsg = Spring.SendLuaRulesMsg
 
-local hud
+local hud, S
 local document
 local view
 
+local factions = {}         -- from slate_game.lua: id, name, blurb, picture, color
+local groupWidth = 0        -- all the cards and the gaps between them
+
 local chosen         = false -- true once the local player's choice has been sent
-local chosenCommName = nil
+local chosenID       = nil
 local hovered        = nil   -- index of the card under the mouse
 local gameStarted    = false -- true once the game frame is past 0
 local isSpectator    = false
@@ -92,18 +97,28 @@ local lastBeepSecond = nil
 -- showing
 --------------------------------------------------------------------------------
 
+local function Accent(faction)
+	return faction.color or S.AccentColor()
+end
+
 local function CardsRML()
 	local parts = {}
-	for i, fd in ipairs(FACTION_DATA) do
+	for i, faction in ipairs(factions) do
+		local picture = ""
+		if faction.picture and faction.picture ~= "" then
+			picture = string.format('<img class="hero" src="/%s"/>', faction.picture)
+		else
+			picture = '<div class="hero"/>'
+		end
 		parts[i] = string.format(
 			'<div id="card%d" class="card panel%s" data-card="%d">'
-			.. '<div class="accent" style="background-color: %s;"/>'
+			.. '<div class="topline" style="background-color: %s;"/>'
 			.. '<div class="cname title">%s</div>'
-			.. '<img class="hero" src="/%s"/>'
+			.. picture
 			.. '<div class="cdesc">%s</div>'
 			.. '<div id="card%d-state" class="cstate label">Choose</div>'
 			.. '</div>',
-			i, (i > 1) and " second" or "", i, fd.accent, hud.Escape(fd.label), fd.heroImg, hud.Escape(fd.description), i)
+			i, (i > 1) and " second" or "", i, Accent(faction), hud.Escape(faction.name or faction.id), hud.Escape(faction.blurb or ""), i)
 	end
 	return table.concat(parts)
 end
@@ -127,12 +142,12 @@ local function Refresh()
 	if isSpectator then
 		return
 	end
-	for i, fd in ipairs(FACTION_DATA) do
+	for i, faction in ipairs(factions) do
 		local id = "card" .. i
-		local isChosen = chosen and fd.commName == chosenCommName
-		-- once a faction is chosen the other card no longer answers the mouse
+		local isChosen = chosen and faction.id == chosenID
+		-- once a faction is chosen the other cards no longer answer the mouse
 		local lit = isChosen or (not chosen and hovered == i)
-		view.SetStyle(id, "border-color", lit and fd.accent or BORDER_IDLE)
+		view.SetStyle(id, "border-color", lit and Accent(faction) or BORDER_IDLE)
 		view.SetClass(id, "chosen", isChosen)
 		view.SetClass(id, "passed", chosen and not isChosen)
 		view.SetText(id .. "-state", isChosen and "Chosen" or "Choose")
@@ -145,19 +160,19 @@ end
 
 -- Sends the choice. Returns true when it went out.
 local function Choose(index)
-	local fd = FACTION_DATA[index]
-	local def = fd and UnitDefNames[fd.commName]
+	local faction = factions[index]
+	local def = faction and UnitDefNames[faction.id]
 	if not def or not def.id then
 		return false
 	end
 	spSendLuaRulesMsg(SPAWN_MSG_BYTE .. def.id)
-	chosen         = true
-	chosenCommName = fd.commName
+	chosen   = true
+	chosenID = faction.id
 	return true
 end
 
 local function AutoPickFaction()
-	Choose(math.random(1, #FACTION_DATA))
+	Choose(math.random(1, #factions))
 end
 
 --------------------------------------------------------------------------------
@@ -169,15 +184,37 @@ local function DefaultOrigin(vsx, vsy, w, h, scale)
 end
 
 local function Place()
-	hud.PlacePanel(view.Element("chooser"), LAYOUT_NAME, GROUP_WIDTH, GROUP_HEIGHT, DefaultOrigin)
+	local chooser = view.Element("chooser")
+	chooser.style["width"] = groupWidth .. "dp"
+	view.Element("heading").style["width"] = groupWidth .. "dp"
+	view.ForgetStyles()
+	hud.PlacePanel(chooser, LAYOUT_NAME, groupWidth, GROUP_HEIGHT, DefaultOrigin)
+end
+
+-- the job is done: Shutdown clears WG.SlatePregame so the HUD comes back
+local function Leave()
+	widgetHandler:RemoveWidget(widget)
 end
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget(widget)
+		return
+	end
+	-- a game with no factions has no use for this widget
+	factions = S.game.factions or {}
+	if #factions == 0 then
+		widgetHandler:RemoveWidget(widget)
+		return
+	end
+	groupWidth = CARD_WIDTH * #factions + CARD_GAP * (#factions - 1)
+
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Faction Chooser] " .. tostring(reason))
-		widgetHandler:RemoveWidget(self)
+		Spring.Echo("[Slate Faction Chooser] " .. tostring(reason))
+		widgetHandler:RemoveWidget(widget)
 		return
 	end
 	hud = helpers
@@ -195,7 +232,7 @@ function widget:Initialize()
 		end
 		local index = hud.EventAttribute(event, "data-card")
 		if index and event.parameters and event.parameters.button == 0 and Choose(index) then
-			spPlaySoundFile("leftclick", 1.0, "ui")
+			hud.Sound("click")
 			Refresh()
 		end
 	end)
@@ -204,7 +241,7 @@ function widget:Initialize()
 		if index ~= hovered then
 			hovered = index
 			if index and not chosen then
-				spPlaySoundFile("hover", 1.0, "ui")
+				hud.Sound("hover")
 			end
 			Refresh()
 		end
@@ -217,16 +254,17 @@ function widget:Initialize()
 	end)
 
 	hud.RegisterPanel(LAYOUT_NAME, "Faction Chooser", Place)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 	hud.ShowPassive(document)
 end
 
 function widget:Shutdown()
+	WG.SlatePregame = nil
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end
@@ -255,12 +293,15 @@ function widget:Update()
 	end
 
 	-- Once the phase is no longer "faction" (placement has started, or the
-	-- game is already under way), the job here is done.
+	-- game is already under way), the job here is done. No phase at all means
+	-- no gadget: the game has started without a faction choice, so go too.
 	local currentPhase = Spring.GetGameRulesParam("phase")
-	if currentPhase ~= nil and currentPhase ~= "faction" then
-		widgetHandler:RemoveWidget(self)
+	if currentPhase ~= "faction" then
+		Leave()
 		return
 	end
+	-- the rest of the HUD stays hidden for as long as the choice is open
+	WG.SlatePregame = true
 
 	-- The gadget's deadline is the one that counts; it is shortened when
 	-- every player has chosen early.
@@ -271,7 +312,7 @@ function widget:Update()
 	secondsLeft = math.ceil(framesLeft / (30 * gameSpeed))
 
 	if secondsLeft <= COUNTDOWN_BEEP_AT and secondsLeft ~= lastBeepSecond and secondsLeft > 0 then
-		spPlaySoundFile("hover", 0.6, "ui")
+		hud.Sound("hover", 0.6)
 		lastBeepSecond = secondsLeft
 	end
 
@@ -281,7 +322,7 @@ function widget:Update()
 			AutoPickFaction()
 		end
 		-- (the phase change above is the usual way out; this is the fallback)
-		widgetHandler:RemoveWidget(self)
+		Leave()
 		return
 	end
 

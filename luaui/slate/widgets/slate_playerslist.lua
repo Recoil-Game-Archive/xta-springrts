@@ -1,37 +1,33 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Players list of the RmlUi HUD.
---
---  At the bottom right: game time, speed and fps; then every player grouped
---  by alliance, with their team's metal and energy bars and upgrade levels
---  (for teams you may see), cpu and ping, and fps; then the spectators, folded
---  away until their header is clicked.
---
---  With dynamic alliances on, each enemy row has a square: click it to offer
---  or withdraw an alliance. A spectator clicks a player to watch through that
---  player's camera. Hovering the cpu/ping cells shows the player's system.
---
---  Replaces gui_static_playerslist.lua (kept in Widgets/disabled/). The code
---  that reads the players and the camera lock are carried over unchanged, and
---  so are the interfaces other widgets use: WG.SlatePlayersList.GetRect and
---  WG.advplayerlist_api.
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Players List",
-
-		desc    = "Players by alliance with resources, upgrades, cpu/ping and fps; spectators; alliance offers; spectator click-to-follow ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-12",
+		desc    = "Players by alliance with resources, cpu/ping and fps; spectators; alliance offers; click an ally to share, spectator click-to-follow",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = -4,
 		enabled = true,
 	}
 end
+
+--------------------------------------------------------------------------------
+--  At the bottom right: game time, speed and fps; then every player grouped
+--  by alliance, with their team's metal and energy bars (for teams you may
+--  see), cpu and ping, and fps; then the spectators, folded away until their
+--  header is clicked.
+--
+--  Click an ally to open the share window for that team. With dynamic
+--  alliances on, each enemy row has a square: click it to offer or withdraw
+--  an alliance. A spectator clicks a player to watch through that player's
+--  camera. Hovering the cpu/ping cells shows the player's system.
+--
+--  The fps, system and camera of the other players come from Slate Broadcast
+--  (WG.SlateBroadcast), so they only show for players running Slate.
+--------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
 -- config
@@ -48,10 +44,9 @@ local GROUP_GAP   = 7
 local SPEC_HEADER = 20
 local SPEC_ROW    = 16
 
-local MARGIN    = 14
 local POPUP_GAP = 8
 
-local LAYOUT_NAME = "playerslist" -- same as the old widget, so a saved position carries over
+local LAYOUT_NAME = "slate_playerslist"
 
 -- Rejoin/lag detection: the engine exposes no explicit "catching up" flag to
 -- LuaUI, but a rejoining client's reported ping is its time-behind while it
@@ -65,14 +60,12 @@ local REJOIN_GRACE_S = 120    -- how long after reconnect we call it "rejoining"
 local lockcameraHideEnemies = true
 local lockcameraLos         = true
 local transitionTime        = 0.6
-local listTime              = 14   -- seconds to keep a broadcaster "recent"
+local listTime              = 14   -- seconds since their last camera to still count a player as broadcasting
 
 --------------------------------------------------------------------------------
 -- locals
 --------------------------------------------------------------------------------
 
-local spGetMouseState      = Spring.GetMouseState
-local spPlaySoundFile      = Spring.PlaySoundFile
 local spGetPlayerInfo      = Spring.GetPlayerInfo
 local spGetPlayerList      = Spring.GetPlayerList
 local spGetTeamInfo        = Spring.GetTeamInfo
@@ -80,7 +73,6 @@ local spGetTeamColor       = Spring.GetTeamColor
 local spGetTeamList        = Spring.GetTeamList
 local spGetAllyTeamList    = Spring.GetAllyTeamList
 local spGetTeamResources   = Spring.GetTeamResources
-local spGetTeamRulesParam  = Spring.GetTeamRulesParam
 local spGetMyTeamID        = Spring.GetMyTeamID
 local spGetMyAllyTeamID    = Spring.GetMyAllyTeamID
 local spGetMyPlayerID      = Spring.GetMyPlayerID
@@ -101,7 +93,7 @@ local math_max   = math.max
 local math_min   = math.min
 local osclock    = os.clock
 
-local hud
+local hud, S
 local document
 local view
 
@@ -111,7 +103,6 @@ local view
 
 local myTeamID, myAllyTeam, myPlayerID
 local mySpecStatus, fullView
-local fixedallies   = tonumber(Spring.GetModOptions().fixedallies)
 local drawAllyButton = false
 
 local groups        = {}    -- ordered: { allyTeam, isEnemy, teams={ {teamID,...,rows={...}} } }
@@ -120,24 +111,15 @@ local rows          = {}    -- the player and AI rows, flat, in the order shown;
 local specsExpanded = false
 
 local panelRect = {x1=0, y1=0, x2=0, y2=0}   -- screen pixels, y up
-local uiScale   = 1.0                        -- pixels per dp, for the API shim below
 
 -- connection tracking (disconnect / rejoin)
 local wasConnected  = {}   -- playerID -> last seen 'active' state
 local reconnectTime = {}   -- playerID -> os.clock() of last false->true flip
 
--- broadcast-fed per-player data
-local lastFpsData    = {}
-local lastGpuMemData = {}
-local lastSystemData = {}
-
 -- camera lock state
 local lockPlayerID
-local lastBroadcasts      = {}
-local recentBroadcasters  = {}
+local appliedCamera        -- the camera state table last passed on to the engine
 local myLastCameraState
-local newBroadcaster      = false
-local totalTime           = 0
 local sceduledSpecFullView
 local desiredLosmode
 local desiredLosmodeChanged = 0
@@ -177,54 +159,43 @@ end
 local function WeAllied(teamID)   return spAreTeamsAllied(teamID, myTeamID) end
 local function TheyAllied(teamID) return spAreTeamsAllied(myTeamID, teamID) end
 
--- The system string is scraped from infolog's <User System> block, whose lines
--- carry a "[t=HH:MM:SS.ffffff]" frame-time prefix. The upstream builder strips
--- "[t=" but leaves the "HH:MM:SS.ffffff]" tail, which then leaks mid-line when
--- core lines get joined. Scrub both the full prefix and the leftover fragments.
-local function SanitizeSystemString(s)
-	s = tostring(s or "")
-	s = s:gsub("%[t=[%d:%.]+%]", "")          -- full "[t=00:00:00.008274]"
-	s = s:gsub("%d%d:%d%d:%d%d%.%d+%]", "")   -- leftover "00:00:00.008274]"
-	return s
-end
-
-
 --------------------------------------------------------------------------------
--- broadcast receivers (registered as globals; fed by the broadcaster gadgets)
+-- what the other players' Slate told us (slate_broadcast.lua)
 --------------------------------------------------------------------------------
 
-function FpsEvent(playerID, fps)
-	lastFpsData[playerID] = fps
-	WG.playerFPS = WG.playerFPS or {}
-	WG.playerFPS[playerID] = fps
+local function Broadcast()
+	return WG.SlateBroadcast
 end
 
-function GpuMemEvent(playerID, percentage)
-	lastGpuMemData[playerID] = percentage
+local function PlayerFps(playerID)
+	local b = Broadcast()
+	return b and tonumber(b.fps[playerID]) or nil
 end
 
-function SystemEvent(playerID, system)
-	lastSystemData[playerID] = system
-	WG.playerSystemData = WG.playerSystemData or {}
-	WG.playerSystemData[playerID] = system
+-- a table of lines, or nil
+local function PlayerSystem(playerID)
+	local b = Broadcast()
+	return b and b.system[playerID] or nil
 end
 
+-- the newest camera state sent by this player, or nil
+local function PlayerCamera(playerID)
+	local b = Broadcast()
+	local entry = b and b.camera[playerID]
+	return entry and entry.state or nil
+end
+
+-- A player counts as broadcasting while their last camera is recent: only
+-- those can be followed, so only their rows are offered to a spectator.
+local function IsBroadcasting(playerID)
+	local b = Broadcast()
+	local entry = b and b.camera[playerID]
+	return entry ~= nil and (b.now() - entry.time) <= listTime
+end
 
 --------------------------------------------------------------------------------
--- camera lock (a faithful port from AdvPlayersList, carried over unchanged)
+-- camera lock (a port from AdvPlayersList)
 --------------------------------------------------------------------------------
-
-local function UpdateRecentBroadcasters()
-	recentBroadcasters = {}
-	for playerID, info in pairs(lastBroadcasts) do
-		local lastT = info[1]
-		if (totalTime - lastT <= listTime) or playerID == lockPlayerID then
-			if (totalTime - lastT <= listTime) then
-				recentBroadcasters[playerID] = totalTime - lastT
-			end
-		end
-	end
-end
 
 local function LockCamera(playerID)
 	if playerID and playerID ~= myPlayerID and playerID ~= lockPlayerID then
@@ -250,9 +221,9 @@ local function LockCamera(playerID)
 		end
 		lockPlayerID = playerID
 		myLastCameraState = myLastCameraState or spGetCameraState()
-		local info = lastBroadcasts[lockPlayerID]
-		if info then
-			spSetCameraState(info[2], transitionTime)
+		appliedCamera = PlayerCamera(lockPlayerID)
+		if appliedCamera then
+			spSetCameraState(appliedCamera, transitionTime)
 		end
 	else
 		if myLastCameraState then
@@ -269,31 +240,28 @@ local function LockCamera(playerID)
 			end
 		end
 		lockPlayerID = nil
+		appliedCamera = nil
 	end
-	UpdateRecentBroadcasters()
 	contentDirty = true
 end
 
-function CameraBroadcastEvent(playerID, cameraState)
-	if not cameraState then
-		if lastBroadcasts[playerID] then
-			lastBroadcasts[playerID] = nil
-			newBroadcaster = true
-		end
-		if lockPlayerID == playerID then
-			LockCamera()
-		end
+-- Every frame while locked: pass on each new camera state as it arrives
+-- (Slate Broadcast makes a new table per message, so a change of table is a
+-- new state), and let go of a player who stopped broadcasting.
+local function FollowCamera()
+	if not lockPlayerID then
 		return
 	end
-	if not lastBroadcasts[playerID] and not newBroadcaster then
-		newBroadcaster = true
+	if not IsBroadcasting(lockPlayerID) then
+		LockCamera()
+		return
 	end
-	lastBroadcasts[playerID] = {totalTime, cameraState}
-	if playerID == lockPlayerID then
-		spSetCameraState(cameraState, transitionTime)
+	local state = PlayerCamera(lockPlayerID)
+	if state and state ~= appliedCamera then
+		appliedCamera = state
+		spSetCameraState(state, transitionTime)
 	end
 end
-
 
 --------------------------------------------------------------------------------
 -- reading the players (carried over unchanged)
@@ -314,8 +282,10 @@ local function RefreshPlayers()
 	myAllyTeam  = spGetMyAllyTeamID()
 	myPlayerID  = spGetMyPlayerID()
 	mySpecStatus, fullView = spGetSpectatingState()
-	fixedallies = tonumber(Spring.GetModOptions().fixedallies)
-	drawAllyButton = (not fixedallies or fixedallies == 0) and not mySpecStatus
+	-- the engine only takes "ally" commands with the fixedallies mod option
+	-- switched off (it is on when the game does not set it)
+	local fixedallies = tostring(Spring.GetModOptions().fixedallies or "1"):lower()
+	drawAllyButton = (fixedallies == "0" or fixedallies == "false") and not mySpecStatus
 	local gaia = spGetGaiaTeamID and spGetGaiaTeamID() or -1
 
 	-- human players grouped by team
@@ -376,15 +346,6 @@ local function RefreshPlayers()
 					if e then eCur, eMax = e, math_max(es or 1, 1) end
 				end
 
-				-- team upgrade levels ("upgrade_weapons_level"/"upgrade_armor_level"
-				-- are {allied=true} rules params -- the engine already returns nil to
-				-- non-allied, non-spectator viewers; `readable` mirrors that gate.
-				local wLvl, aLvl
-				if readable then
-					wLvl = tonumber((spGetTeamRulesParam(teamID, "upgrade_weapons_level"))) or 0
-					aLvl = tonumber((spGetTeamRulesParam(teamID, "upgrade_armor_level"))) or 0
-				end
-
 				local teamRows = {}
 				local plist = teamPlayers[teamID]
 				if plist and #plist > 0 then
@@ -405,7 +366,6 @@ local function RefreshPlayers()
 					groupTeams[#groupTeams+1] = {
 						teamID = teamID, allyTeam = allyTeam, color = color, dark = dark, dead = isDead,
 						readable = readable, mCur = mCur, mMax = mMax, eCur = eCur, eMax = eMax,
-						wLvl = wLvl, aLvl = aLvl,
 						rows = teamRows,
 					}
 				end
@@ -452,8 +412,7 @@ local function RowRML(i, row)
 	if row.team.readable then
 		parts[#parts + 1] = string.format(
 			'<div class="res"><div class="track"><div id="r%d-m" class="fill metal"/></div>'
-			.. '<div class="track"><div id="r%d-e" class="fill energy"/></div></div>'
-			.. '<div class="upg"><div id="r%d-w" class="w"/><div id="r%d-a" class="a"/></div>', i, i, i, i)
+			.. '<div class="track"><div id="r%d-e" class="fill energy"/></div></div>', i, i)
 	end
 	if row.kind == "player" then
 		parts[#parts + 1] = string.format(
@@ -550,7 +509,9 @@ local function ShowRows()
 		view.SetClass(id .. "-tag", "dc", tag == "dc")
 		view.SetClass(id, "dim", team.dead or tag == "dc")
 		view.SetClass(id, "locked", row.playerID ~= nil and row.playerID == lockPlayerID)
-		view.SetClass(id, "watchable", mySpecStatus and row.playerID ~= nil)
+		view.SetClass(id, "watchable", mySpecStatus and row.playerID ~= nil and IsBroadcasting(row.playerID))
+		-- a player can click an ally to share with them
+		view.SetClass(id, "shareable", not mySpecStatus and not row.isEnemy and team.teamID ~= myTeamID and not team.dead)
 
 		if drawAllyButton and row.isEnemy then
 			local weToThem, themToUs = WeAllied(team.teamID), TheyAllied(team.teamID)
@@ -562,10 +523,6 @@ local function ShowRows()
 		if team.readable then
 			view.SetStyle(id .. "-m", "width", Percent(team.mCur, team.mMax))
 			view.SetStyle(id .. "-e", "width", Percent(team.eCur, team.eMax))
-			view.SetText(id .. "-w", "W" .. (team.wLvl or 0))
-			view.SetText(id .. "-a", "A" .. (team.aLvl or 0))
-			view.SetClass(id .. "-w", "on", (team.wLvl or 0) > 0)
-			view.SetClass(id .. "-a", "on", (team.aLvl or 0) > 0)
 		end
 
 		if row.kind == "player" then
@@ -575,7 +532,7 @@ local function ShowRows()
 				view.SetClass(id .. "-cpu", "l" .. level, cpu == level)
 				view.SetClass(id .. "-ping", "l" .. level, ping == level)
 			end
-			local fps = row.connected and tonumber(lastFpsData[row.playerID]) or nil
+			local fps = row.connected and PlayerFps(row.playerID) or nil
 			view.SetText(id .. "-fps", fps and tostring(math_min(999, math_floor(fps))) or "")
 		end
 	end
@@ -610,7 +567,8 @@ local function PanelHeight()
 end
 
 local function DefaultOrigin(vsx, vsy, w, h, scale)
-	return vsx - MARGIN * scale - w, MARGIN * scale
+	local margin = hud.Margin() * scale
+	return vsx - margin - w, margin
 end
 
 local function Place()
@@ -619,7 +577,6 @@ local function Place()
 		shownHeight = height
 		view.Element("players").style["height"] = height .. "dp"
 	end
-	uiScale = hud.GetScale()
 	local x, y, w, h = hud.PlacePanel(view.Element("players"), LAYOUT_NAME, PANEL_WIDTH, height, DefaultOrigin)
 	if x then
 		panelRect = {x1 = x, y1 = y, x2 = x + w, y2 = y + h}
@@ -632,25 +589,20 @@ end
 
 local function SystemLines(row)
 	local pid = row.playerID
-	local fps = lastFpsData[pid]
-	local gpumem = lastGpuMemData[pid]
+	local fps = PlayerFps(pid)
 	-- (runs of spaces collapse in RML, so the figures are set apart by dots)
 	local dot = " \194\183 "
-	local second = "FPS " .. tostring(fps or "?") .. dot .. "CPU " .. math_floor((row.cpu or 0) * 100) .. "%"
-	if gpumem ~= nil then
-		second = second .. dot .. "GPU mem " .. tostring(gpumem) .. "%"
-	end
+	local second = "FPS " .. (fps and tostring(math_floor(fps)) or "?") .. dot .. "CPU " .. math_floor((row.cpu or 0) * 100) .. "%"
 	second = second .. dot .. "Ping " .. math_floor((row.ping or 0) * 1000) .. " ms"
 
 	local lines = {row.name, second}
-	local system = lastSystemData[pid]
+	local system = PlayerSystem(pid)
 	if system then
-		for line in SanitizeSystemString(system):gmatch("([^\r\n]+)") do
-			line = line:gsub("%s%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-			if line ~= "" then
-				lines[#lines + 1] = line
-			end
+		for i = 1, #system do
+			lines[#lines + 1] = system[i]
 		end
+	else
+		lines[#lines + 1] = "(not running Slate: no system details)"
 	end
 	return lines
 end
@@ -726,21 +678,37 @@ local function OnListMouseDown(event)
 	if row then
 		if drawAllyButton then
 			spSendCommands("ally " .. row.team.allyTeam .. (WeAllied(row.team.teamID) and " 0" or " 1"))
-			spPlaySoundFile("leftclick", 1.0, "ui")
+			hud.Sound("click")
 		end
 		return
 	end
-	-- a spectator clicks a player to follow their camera, and again to let go
 	index = hud.EventAttribute(event, "data-r")
 	row = index and rows[index]
-	if row and mySpecStatus and row.playerID then
-		spPlaySoundFile("leftclick", 1.0, "ui")
-		if row.playerID == lockPlayerID then
-			LockCamera()
-		else
-			LockCamera(row.playerID)
+	if not row then
+		return
+	end
+	-- a spectator clicks a player to follow their camera, and again to let go
+	if mySpecStatus then
+		if row.playerID and (IsBroadcasting(row.playerID) or row.playerID == lockPlayerID) then
+			hud.Sound("click")
+			if row.playerID == lockPlayerID then
+				LockCamera()
+			else
+				LockCamera(row.playerID)
+			end
+			ShowRows()
 		end
-		ShowRows()
+		return
+	end
+	-- a player clicks an ally to share with that team
+	local share = WG.SlateShare
+	if share and not row.isEnemy and row.team.teamID ~= myTeamID and not row.team.dead then
+		hud.Sound("click")
+		if share.Open then
+			share.Open(row.team.teamID)
+		elseif share.Toggle then
+			share.Toggle()
+		end
 	end
 end
 
@@ -754,7 +722,7 @@ local function OnListMouseOver(event)
 		hover = (index and rows[index]) and {kind = "net", index = index, name = rows[index].name} or nil
 	end
 	if hover and hover.kind == "ally" and not (previous and previous.kind == "ally" and previous.index == hover.index) then
-		spPlaySoundFile("hover", 1.0, "ui")
+		hud.Sound("hover")
 	end
 	ShowPopup()
 end
@@ -765,40 +733,19 @@ local function OnListMouseOut()
 end
 
 --------------------------------------------------------------------------------
--- advplayerlist_api shim (so camera_player_tv.lua keeps working untouched)
---------------------------------------------------------------------------------
-
-local function PublishApi()
-	WG['advplayerlist_api'] = {}
-	WG['advplayerlist_api'].GetPosition = function()
-		-- Consumers (camera_player_tv) read [1] as the bottom anchor and grow
-		-- upward from it. Returning the panel TOP as [1] makes Player TV's small
-		-- panel sit directly above this bottom-right list instead of overlapping.
-		-- {anchorBottom, left, bottom, right, widgetScale}
-		return {panelRect.y2, panelRect.x1, panelRect.y1, panelRect.x2, uiScale}
-	end
-	WG['advplayerlist_api'].GetLockPlayerID = function()
-		return lockPlayerID
-	end
-	WG['advplayerlist_api'].SetLockPlayerID = function(playerID)
-		LockCamera(playerID)
-	end
-	-- harmless stubs in case other widgets probe these
-	WG['advplayerlist_api'].GetLockHideEnemies = function() return lockcameraHideEnemies end
-	WG['advplayerlist_api'].SetLockHideEnemies = function(v) lockcameraHideEnemies = v end
-	WG['advplayerlist_api'].GetLockLos = function() return lockcameraLos end
-	WG['advplayerlist_api'].SetLockLos = function(v) lockcameraLos = v end
-end
-
---------------------------------------------------------------------------------
 -- widget api
 --------------------------------------------------------------------------------
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Players List] " .. tostring(reason))
+		Spring.Echo("[Slate Players List] " .. tostring(reason))
 		widgetHandler:RemoveWidget()
 		return
 	end
@@ -816,40 +763,37 @@ function widget:Initialize()
 	spSendCommands("clock 0")
 	spSendCommands("speed 0")
 
-	widgetHandler:RegisterGlobal('FpsEvent', FpsEvent)
-	widgetHandler:RegisterGlobal('GpuMemEvent', GpuMemEvent)
-	widgetHandler:RegisterGlobal('SystemEvent', SystemEvent)
-	widgetHandler:RegisterGlobal('CameraBroadcastEvent', CameraBroadcastEvent)
-
 	local list = view.Element("list")
 	list:AddEventListener("mousedown", OnListMouseDown)
 	list:AddEventListener("mouseover", OnListMouseOver)
 	list:AddEventListener("mouseout", OnListMouseOut)
 	hud.OnClick(view, "spechdr", function()
 		specsExpanded = not specsExpanded
-		spPlaySoundFile("leftclick", 1.0, "ui")
+		hud.Sound("click")
 		Refresh()
 	end)
-	-- erases every map mark and drawing (this was the eraser icon of the old
-	-- "Clearmapmarks button" widget, which hung beside the list)
+	-- erases every map mark and drawing
 	hud.OnClick(view, "tb-marks", function()
-		spPlaySoundFile("leftclick", 1.0, "ui")
+		hud.Sound("click")
 		spSendCommands("clearmapmarks")
 	end)
 	view.Element("spechdr"):AddEventListener("mouseover", function()
-		spPlaySoundFile("hover", 1.0, "ui")
+		hud.Sound("hover")
 	end)
 
-	-- Other widgets (the abilities panel) hang off this panel. The rectangle
-	-- is the live one, including changes of height while the game runs.
+	-- Other widgets may hang off this panel. The rectangle is the live one,
+	-- including changes of height while the game runs. The camera lock is
+	-- offered for a spectator tool that picks whom to follow.
 	WG.SlatePlayersList = {
 		GetRect = function()
 			return panelRect.x1, panelRect.y1, panelRect.x2, panelRect.y2
 		end,
+		GetLockPlayerID = function() return lockPlayerID end,
+		SetLockPlayerID = LockCamera,
 	}
-	PublishApi()
 
 	hud.RegisterPanel(LAYOUT_NAME, "Players List", Refresh)
+	hud.OnChange(LAYOUT_NAME, Refresh)
 	Refresh()
 	hud.ShowPassive(document)
 end
@@ -857,18 +801,13 @@ end
 function widget:Shutdown()
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
 	end
 	if document then
-		document:Close()
+		hud.CloseDocument(document)
 		document = nil
 
-		widgetHandler:DeregisterGlobal('FpsEvent')
-		widgetHandler:DeregisterGlobal('GpuMemEvent')
-		widgetHandler:DeregisterGlobal('SystemEvent')
-		widgetHandler:DeregisterGlobal('CameraBroadcastEvent')
-
 		WG.SlatePlayersList = nil
-		WG['advplayerlist_api'] = nil
 
 		spSendCommands("info 1")
 		spSendCommands("fps 1")
@@ -910,7 +849,6 @@ function widget:Update(dt)
 	if not document then
 		return
 	end
-	totalTime = totalTime + dt
 	mySpecStatus, fullView = spGetSpectatingState()
 
 	-- deferred specfullview re-apply (minimap/world refresh)
@@ -933,10 +871,7 @@ function widget:Update(dt)
 		end
 	end
 
-	-- keep camera following while locked
-	if lockPlayerID ~= nil then
-		spSetCameraState(spGetCameraState(), transitionTime)
-	end
+	FollowCamera()
 
 	if hud.FollowGuiHidden(document) then
 		hover = nil

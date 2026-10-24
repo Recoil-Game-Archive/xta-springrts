@@ -6,7 +6,7 @@
 		/* A small handle in the top right corner, and the menu it (or Esc)
 		   opens. The handle's position is set from Lua (hud.PlacePanel); its
 		   size here must match BUTTON_WIDTH and BUTTON_HEIGHT in
-		   gui_bastion_menu.lua. */
+		   slate_menu.lua. */
 		#menu-button {
 			position: absolute;
 			left: 0px;
@@ -66,6 +66,7 @@
 			padding: 8dp 10dp 8dp 10dp;
 			border: 1dp rgba(255,255,255,36);
 			border-left: 2dp #a9bdd0;
+			border-radius: 5dp;
 			background-color: rgba(255,255,255,10);
 		}
 		#music-label {
@@ -131,13 +132,16 @@
 				<div id="m-keybinds" class="button quiet">Keybinds</div>
 				<div id="m-widgets" class="button quiet">Widgets</div>
 
-				<div id="m-sharing" class="button quiet group">Sharing</div>
-				<div id="m-economy" class="button quiet">Economy</div>
-				<div id="m-graph" class="button quiet">Graph</div>
+				<div id="m-share" class="button quiet group">Share</div>
+				<div id="m-economy" class="button quiet">Economy graph</div>
+				<div id="m-graph" class="button quiet">Team statistics</div>
 				<div id="m-log" class="button quiet">Log</div>
-				<div id="m-info" class="button quiet">Game Info</div>
 
-				<div id="m-resign" class="button quiet group">Resign</div>
+				<!-- the game's own entries (slate_game.lua, menu = {...}) are generated here -->
+				<div id="game-items"/>
+
+				<div id="m-pause" class="button quiet group">Pause</div>
+				<div id="m-resign" class="button quiet">Resign</div>
 				<div id="m-quit" class="button quiet">Quit</div>
 
 				<div id="music" class="hidden">

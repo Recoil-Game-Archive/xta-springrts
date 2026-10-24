@@ -1,31 +1,27 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Vote window of the RmlUi HUD. When someone calls a vote on the server
---  (the autohost announces it in the console), a small window shows what the
---  vote is about, with Yes and No. Esc, or the ESC button, abstains. The
---  player who called the vote gets "End vote" instead.
---
---  Only players see it: not spectators, and not in replays.
---
---  Replaces gui_vote_interface.lua by Floris (kept in Widgets/disabled/). The
---  reading of the console lines is carried over.
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Vote",
-
-		desc    = "Shows a called vote with Yes and No buttons ",
-		author  = "Floris; SplinterFaction Team",
-		date    = "2026-10-13",
+		desc    = "Shows a called vote with Yes and No buttons",
+		author  = "Floris; Scary le Poo",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = -2000, -- ahead of the game menu, so Esc answers the vote first
 		enabled = true,
 	}
 end
+
+--------------------------------------------------------------------------------
+--  Vote window. When someone calls a vote on the server (the autohost
+--  announces it in the console), a small window shows what the vote is
+--  about, with Yes and No. Esc, or the ESC button, abstains. The player who
+--  called the vote gets "End vote" instead.
+--
+--  Only players see it: not spectators, and not in replays.
+--------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
 -- config
@@ -36,16 +32,16 @@ local DOCUMENT_PATH = "vote.rml"
 -- must match #vote in vote.rml
 local PANEL_WIDTH  = 380
 local PANEL_HEIGHT = 112
-local PANEL_TOP    = 92 -- below the resource bar
+local RESOURCE_BAR_HEIGHT = 64 -- the window sits under the resource bar
 
-local LAYOUT_NAME = "vote"
+local LAYOUT_NAME = "slate_vote"
 
-local hud
+local hud, S
 local document
 local view
 
 local myPlayerID = Spring.GetMyPlayerID()
-local myName, _, mySpec, myTeamID, myAllyTeamID = Spring.GetPlayerInfo(myPlayerID, false)
+local myName, _, mySpec, _, myAllyTeamID = Spring.GetPlayerInfo(myPlayerID, false)
 local startedAsPlayer = not mySpec
 local gameStarted = false
 
@@ -87,7 +83,7 @@ end
 local function isTeamPlayer(playerName)
 	local players = Spring.GetPlayerList()
 	for _,pID in ipairs(players) do
-		local name,_,spec,teamID,allyTeamID = Spring.GetPlayerInfo(pID,false)
+		local name,_,_,_,allyTeamID = Spring.GetPlayerInfo(pID,false)
 		if name == playerName then
 			if allyTeamID == myAllyTeamID then
 				return true
@@ -97,7 +93,7 @@ local function isTeamPlayer(playerName)
 	return false
 end
 
-function widget:AddConsoleLine(lines, priority)
+function widget:AddConsoleLine(lines)
 	if not document or not startedAsPlayer then
 		return
 	end
@@ -127,7 +123,7 @@ end
 --------------------------------------------------------------------------------
 
 local function DefaultOrigin(vsx, vsy, w, h, scale)
-	return (vsx - w) * 0.5, vsy - PANEL_TOP * scale - h
+	return (vsx - w) * 0.5, vsy - (hud.Margin() + RESOURCE_BAR_HEIGHT + hud.Gap()) * scale - h
 end
 
 local function Place()
@@ -135,20 +131,21 @@ local function Place()
 end
 
 local function Say(command)
-	Spring.PlaySoundFile("leftclick", 1.0, "ui")
+	hud.Sound("click")
 	Spring.SendCommands("say " .. command)
 	EndVote()
 end
 
 function widget:Initialize()
-	if Spring.IsReplay() then
+	S = WG.Slate
+	if not S or Spring.IsReplay() then
 		widgetHandler:RemoveWidget(self)
 		return
 	end
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Vote interface] " .. tostring(reason))
+		Spring.Echo("[Slate Vote] " .. tostring(reason))
 		widgetHandler:RemoveWidget(self)
 		return
 	end
@@ -169,6 +166,7 @@ function widget:Initialize()
 	end)
 
 	hud.RegisterPanel(LAYOUT_NAME, "Vote", Place, function() return voteName ~= nil end)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 	hud.ShowPassive(document)
 end
@@ -176,9 +174,8 @@ end
 function widget:Shutdown()
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end
@@ -190,7 +187,7 @@ function widget:ViewResize()
 	end
 end
 
-function widget:PlayerChanged(playerID)
+function widget:PlayerChanged()
 	mySpec = Spring.GetSpectatingState()
 end
 
@@ -198,7 +195,7 @@ function widget:GameFrame(n)
 	if n > 0 and not gameStarted then
 		gameStarted = true
 		myPlayerID = Spring.GetMyPlayerID()
-		myName, _, mySpec, myTeamID, myAllyTeamID = Spring.GetPlayerInfo(myPlayerID, false)
+		myName, _, mySpec, _, myAllyTeamID = Spring.GetPlayerInfo(myPlayerID, false)
 		startedAsPlayer = not mySpec
 	end
 end

@@ -5,7 +5,7 @@
 	<style>
 		/* The players list, at the bottom right. Its position and its height
 		   are set from Lua: the height is worked out from the rows, so the
-		   heights here must match the ones in gui_bastion_playerslist.lua
+		   heights here must match the ones in slate_playerslist.lua
 		   (CHROME, TOPBAR, ROW, GROUP_GAP, SPEC_HEADER, SPEC_ROW). */
 		#players {
 			position: absolute;
@@ -47,6 +47,7 @@
 			text-transform: uppercase;
 			color: #b5bac1;
 			border: 1dp rgba(255,255,255,60);
+			border-radius: 5dp;
 		}
 		#tb-marks:hover {
 			color: #f4f5f7;
@@ -59,6 +60,7 @@
 			margin-bottom: 7dp;
 			background-color: rgba(255,255,255,10);
 			border-left: 2dp rgba(255,255,255,60);
+			border-radius: 5dp;
 		}
 		.group.enemy {
 			background-color: rgba(255, 90, 79, 26);
@@ -73,12 +75,16 @@
 			padding: 0dp 4dp 0dp 6dp;
 			font-size: 12dp;
 		}
-		/* a spectator clicks a player to watch through their camera */
-		.prow.watchable:hover {
+		/* a spectator clicks a broadcasting player to watch through their
+		   camera; a player clicks an ally to share with them */
+		.prow.watchable:hover,
+		.prow.shareable:hover {
 			background-color: rgba(255,255,255,41);
+			border-radius: 5dp;
 		}
 		.prow.locked {
-			background-color: rgba(95, 208, 232, 50);
+			background-color: rgba(169, 189, 208, 50);
+			border-radius: 5dp;
 		}
 		.pname {
 			white-space: nowrap;
@@ -127,18 +133,6 @@
 		}
 		.fill.metal { background-color: #a9c9ea; }
 		.fill.energy { background-color: #f2d64b; }
-
-		/* team upgrade levels: weapons over armor */
-		.upg {
-			width: 32dp;
-			margin-right: 6dp;
-			text-align: center;
-			font-size: 9dp;
-			line-height: 9dp;
-			color: #8a9099;
-		}
-		.upg .on.w { color: #ff965a; }
-		.upg .on.a { color: #78beff; }
 
 		/* cpu over ping, each a strip colored from good to bad */
 		.net {
@@ -197,6 +191,7 @@
 			line-height: 20dp;
 			color: #b5bac1;
 			background-color: rgba(255,255,255,18);
+			border-radius: 5dp;
 		}
 		#spechdr:hover {
 			color: #f4f5f7;

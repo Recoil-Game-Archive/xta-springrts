@@ -125,9 +125,6 @@
 		#footer .button {
 			flex: 1;
 		}
-		#allow {
-			margin-left: 8dp;
-		}
 	</style>
 </head>
 <body>
@@ -147,7 +144,6 @@
 			</div>
 			<div id="footer">
 				<div id="reload" class="button quiet">Reload LuaUI</div>
-				<div id="allow" class="button quiet">Allow user widgets</div>
 			</div>
 		</div>
 	</div>

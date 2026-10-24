@@ -1,7 +1,21 @@
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
+
+function widget:GetInfo()
+	return {
+		name    = "Slate Desync Alert",
+		desc    = "Tells every player at once when someone's game goes out of sync, and whose",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
+		layer   = -3000, -- before the chat, so its console line handling runs first
+		enabled = true,
+	}
+end
+
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Desync alert of the RmlUi HUD.
+--  Desync alert.
 --
 --  A desync is when a player's game stops matching the host's: from then on
 --  they see, and send orders into, a different game from everyone else, and
@@ -21,25 +35,10 @@
 --  record.
 --
 --  Every desync also goes to chat as its own red line, once per player (see
---  gui_bastion_chat.lua), and to the Log window.
+--  slate_chat.lua), and to the Log window.
 --
 --  Interface: WG.SlateDesync = { IsActive(), GetPlayers() } for other widgets.
---
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
-
-function widget:GetInfo()
-	return {
-		name    = "Slate Desync Alert",
-
-		desc    = "Tells every player at once when someone's game goes out of sync, and whose ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-14",
-		license = "GNU GPL, v2 or later",
-		layer   = -3000, -- before the chat, so its console line handling runs first
-		enabled = true,
-	}
-end
 
 --------------------------------------------------------------------------------
 -- config
@@ -53,12 +52,12 @@ local PANEL_HEIGHT = 118
 local PANEL_TOP    = 300 -- clear of the vote window and game messages under the resource bar
 local CHIP_WIDTH   = 300
 local CHIP_HEIGHT  = 22
-local CHIP_TOP     = 70  -- just under the resource bar
+local RESOURCE_BAR_HEIGHT = 64 -- the chip sits just under the resource bar
 
-local LAYOUT_PANEL = "desync"
-local LAYOUT_CHIP  = "desyncchip"
+local LAYOUT_PANEL = "slate_desync"
+local LAYOUT_CHIP  = "slate_desyncchip"
 
-local ALERT_SOUND = "Sounds/ui/Notification_sound_3.wav"
+local ALERT_SOUND = "luaui/sounds/beep5.wav"
 
 -- The engine repeats its report every 400 frames while a desync lasts
 -- (SYNCCHECK_MSG_TIMEOUT in rts/Net/GameServer.cpp). When none has come for
@@ -74,7 +73,7 @@ local UPDATE_INTERVAL = 0.25
 -- state
 --------------------------------------------------------------------------------
 
-local hud
+local hud, S
 local sync
 local document
 local view
@@ -220,7 +219,7 @@ local function OnDesync(names, frame)
 			desynced[name] = { first = frame, last = frame, reports = 1, spectator = IsSpectator(name) }
 			order[#order + 1] = name
 			newcomer = true
-			Spring.Echo("[Desync Alert] " .. name .. " is out of sync from frame " .. frame)
+			Spring.Echo("[Slate Desync Alert] " .. name .. " is out of sync from frame " .. frame)
 		end
 	end
 	if newcomer then
@@ -254,7 +253,7 @@ local function PanelOrigin(vsx, vsy, w, h, scale)
 end
 
 local function ChipOrigin(vsx, vsy, w, h, scale)
-	return (vsx - w) * 0.5, vsy - CHIP_TOP * scale - h
+	return (vsx - w) * 0.5, vsy - (hud.Margin() + RESOURCE_BAR_HEIGHT + hud.Gap()) * scale - h
 end
 
 local function Place()
@@ -263,6 +262,11 @@ local function Place()
 end
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	sync = include("slate/rml/syncmessages.lua")
 	RefreshMyName()
 
@@ -279,7 +283,7 @@ function widget:Initialize()
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
 		-- the alert is lost, but the console line and chat still say it
-		Spring.Echo("[Desync Alert] " .. tostring(reason))
+		Spring.Echo("[Slate Desync Alert] " .. tostring(reason))
 		return
 	end
 	hud = helpers
@@ -290,12 +294,12 @@ function widget:Initialize()
 	view.Assume("desync-chip", "hidden", true)
 
 	hud.OnClick(view, "desync-hide", function()
-		Spring.PlaySoundFile("leftclick", 1.0, "ui")
+		hud.Sound("click")
 		open = false
 		Refresh()
 	end)
 	hud.OnClick(view, "desync-chip", function()
-		Spring.PlaySoundFile("leftclick", 1.0, "ui")
+		hud.Sound("click")
 		open = true
 		pcall(function() document:PullToFront() end)
 		Refresh()
@@ -303,6 +307,7 @@ function widget:Initialize()
 
 	hud.RegisterPanel(LAYOUT_PANEL, "Desync Alert", Place, function() return Active() and open end)
 	hud.RegisterPanel(LAYOUT_CHIP, "Desync Chip", Place, function() return Active() and not open end)
+	hud.OnChange(LAYOUT_PANEL, Place)
 	Place()
 	hud.ShowPassive(document)
 end
@@ -312,9 +317,8 @@ function widget:Shutdown()
 	if hud then
 		hud.UnregisterPanel(LAYOUT_PANEL)
 		hud.UnregisterPanel(LAYOUT_CHIP)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_PANEL)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end

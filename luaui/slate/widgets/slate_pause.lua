@@ -1,30 +1,27 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Pause screen of the RmlUi HUD: while the game is paused the picture is
---  washed out to grey and a "Game Paused" banner stands in the middle of the
---  screen. Both fade in and out.
---
---  The banner is RmlUi. The wash is a screen shader, drawn with gl in
---  DrawScreenEffects (under the whole interface), as before.
---
---  Replaces gui_pauseScreen.lua by Floris (kept in Widgets/disabled/).
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Pause Screen",
-
-		desc    = "Washes the picture out and shows a banner while the game is paused ",
-		author  = "Floris; SplinterFaction Team",
-		date    = "2026-10-13",
-		license = "GNU GPL v2",
+		desc    = "Washes the picture out and shows a banner while the game is paused",
+		author  = "Floris; Scary le Poo",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
 		layer   = 99999999,
 		enabled = true,
 	}
 end
+
+--------------------------------------------------------------------------------
+--  Pause screen: while the game is paused the picture is washed out to grey
+--  and a "Game Paused" banner stands in the middle of the screen. Both fade
+--  in and out.
+--
+--  The banner is RmlUi. The wash is a screen shader, drawn with gl in
+--  DrawScreenEffects (under the whole interface).
+--------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
 -- config
@@ -36,21 +33,20 @@ local DOCUMENT_PATH = "pause.rml"
 local BANNER_WIDTH  = 360
 local BANNER_HEIGHT = 70
 
-local LAYOUT_NAME = "pausebanner"
+local LAYOUT_NAME = "slate_pausebanner"
 
 local FADE_TIME           = 0.4  -- seconds to fade in or out
 local FADE_STEPS          = 20   -- the banner's fade moves in this many steps
 local MAX_SHADER_ALPHA    = 0.25 -- strength of the wash
 local MAX_NONSHADER_ALPHA = 0.12 -- darkening used when the shader is not available
 
-local hud
+local hud, S
 local document
 local view
 
 local paused   = false
 local gameover = false
 local progress = 0     -- 0 = not paused, 1 = fully paused
-local startTime = os.clock()
 
 local vsx, vsy = Spring.GetViewGeometry()
 local screencopy
@@ -110,7 +106,7 @@ end
 -- widget api
 --------------------------------------------------------------------------------
 
-local function DefaultOrigin(sizeX, sizeY, w, h, scale)
+local function DefaultOrigin(sizeX, sizeY, w, h)
 	return (sizeX - w) * 0.5, (sizeY - h) * 0.5
 end
 
@@ -130,6 +126,11 @@ local function CreateScreenCopy()
 end
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	vsx, vsy = Spring.GetViewGeometry()
 	local _, gameSpeed, isPaused = Spring.GetGameSpeed()
 	if isPaused or gameSpeed == 0 then -- when the host (admin) paused, it is just game speed 0
@@ -151,7 +152,7 @@ function widget:Initialize()
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Pause Screen] " .. tostring(reason))
+		Spring.Echo("[Slate Pause Screen] " .. tostring(reason))
 		return -- the wash still works without the banner
 	end
 	hud = helpers
@@ -160,6 +161,7 @@ function widget:Initialize()
 	view.Assume("pause", "hidden", true) -- set in the markup
 
 	hud.RegisterPanel(LAYOUT_NAME, "Pause Banner", Place, function() return progress > 0 end)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 	hud.ShowPassive(document)
 	pcall(function() document:PullToFront() end)
@@ -177,9 +179,8 @@ function widget:Shutdown()
 	end
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end
@@ -199,7 +200,7 @@ function widget:GameOver()
 	gameover = true
 end
 
-function widget:GamePaused(playerID, isGamePaused)
+function widget:GamePaused(_, isGamePaused)
 	paused = isGamePaused
 end
 

@@ -1,36 +1,36 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Game menu of the RmlUi HUD.
---
---  A small MENU handle sits in the top right corner. Clicking it, or pressing
---  Esc, opens the menu: resume, the windows that used to have a button each
---  (settings, keybinds, widgets, sharing, economy, graph, log, game info), and resign and quit,
---  which both ask first. Esc or a click outside the menu closes it. The menu
---  does not pause the game.
---
---  Replaces gui_static_menu.lua (kept in Widgets/disabled/), which showed all
---  eight buttons on screen all the time.
---
---  The windows belong to their own widgets; a window's button is left out of
---  the menu while its widget is not running. Those widgets get Esc first (to
---  close themselves), and Esc is left alone while a chat message is typed.
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
-		name    = "Slate Game Menu",
-
-		desc    = "Esc menu: settings, keybinds, widgets, sharing, graphs, log, resign, quit ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-12",
+		name    = "Slate Menu",
+		desc    = "Esc menu: settings, keybinds, widgets, share, graphs, log, pause, resign, quit",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = 1000, -- after the windows, so they see Esc first
 		enabled = true,
 	}
 end
+
+--------------------------------------------------------------------------------
+--  Game menu.
+--
+--  A small MENU handle sits in the top right corner. Clicking it, or pressing
+--  Esc, opens the menu: resume, the Slate windows (settings, keybinds,
+--  widgets, share, economy graph, team statistics, log), the music row while
+--  the music player runs, pause, and resign and quit, which both ask first.
+--  Esc or a click outside the menu closes it. The menu does not pause the
+--  game.
+--
+--  The windows belong to their own widgets; a window's button is left out of
+--  the menu while its widget is not running. Those widgets get Esc first (to
+--  close themselves), and Esc is left alone while a chat message is typed.
+--
+--  A game adds its own entries in slate_game.lua (menu = { {label=, command=,
+--  confirm=, playersOnly=}, ... }); they come after the Slate windows.
+--------------------------------------------------------------------------------
 
 local DOCUMENT_PATH   = "menu.rml"
 local UPDATE_INTERVAL = 0.25
@@ -39,16 +39,15 @@ local KEY_ESCAPE      = 27
 -- must match #menu-button in menu.rml
 local BUTTON_WIDTH  = 84
 local BUTTON_HEIGHT = 30
-local MARGIN        = 10
 
-local LAYOUT_NAME = "menubutton"
+local LAYOUT_NAME = "slate_menubutton"
 
-local hud
+local hud, S
 local document
 local view
 local lastUpdate
 local open = false
-local confirming -- nil, "resign" or "quit"
+local confirming -- nil, or a key of CONFIRM
 
 --------------------------------------------------------------------------------
 -- what the buttons do
@@ -68,7 +67,7 @@ local WINDOWS = {
 		action = function() WG.SlateKeybinds.Toggle() end},
 	{id = "m-widgets", available = function() return WG.SlateWidgetSelector and WG.SlateWidgetSelector.Toggle end,
 		action = function() WG.SlateWidgetSelector.Toggle() end},
-	{id = "m-sharing", available = function() return WG.SlateShare and WG.SlateShare.Toggle end,
+	{id = "m-share", available = function() return WG.SlateShare and WG.SlateShare.Toggle end,
 		action = function() WG.SlateShare.Toggle() end},
 	{id = "m-economy", available = function() return WG.SlateEconGraph and WG.SlateEconGraph.Toggle end,
 		action = function() WG.SlateEconGraph.Toggle() end},
@@ -76,25 +75,19 @@ local WINDOWS = {
 		action = function() WG.SlateEndGraph.Toggle() end},
 	{id = "m-log", available = function() return WG.SlateLog and WG.SlateLog.Toggle end,
 		action = function() WG.SlateLog.Toggle() end},
-	{id = "m-info", available = function() return WG['gameinfo'] and WG['gameinfo'].toggle end,
-		action = function() WG['gameinfo'].toggle() end},
 }
 
--- Things that cannot be taken back ask first.
+-- Things that cannot be taken back ask first. The game's own confirmed
+-- entries are added at start-up under the key "game<i>".
 local CONFIRM = {
 	resign = {text = "Resign and watch as a spectator?", yes = "Yes, resign", command = "spectator"},
 	quit   = {text = "Quit the game?", yes = "Yes, quit", command = "quitforce"},
 }
 
+-- The game's entries from slate_game.lua, with the id of each one's row.
+local gameEntries = {}
+
 --------------------------------------------------------------------------------
-
-local function PlayHoverSound()
-	Spring.PlaySoundFile("hover", 1.0, "ui")
-end
-
-local function PlayClickSound()
-	Spring.PlaySoundFile("leftclick", 1.0, "ui")
-end
 
 local function Refresh()
 	view.SetClass("menu", "hidden", not open)
@@ -105,8 +98,15 @@ local function Refresh()
 	for _, window in ipairs(WINDOWS) do
 		view.SetClass(window.id, "hidden", not window.available())
 	end
+	local spectating = Spring.GetSpectatingState()
+	for _, entry in ipairs(gameEntries) do
+		view.SetClass(entry.id, "hidden", entry.playersOnly and spectating)
+	end
 	-- a spectator has nothing to resign from
-	view.SetClass("m-resign", "hidden", Spring.GetSpectatingState())
+	view.SetClass("m-resign", "hidden", spectating)
+
+	local _, _, paused = Spring.GetGameSpeed()
+	view.SetText("m-pause", paused and "Unpause" or "Pause")
 
 	-- the music row, while the player is running
 	local music = WG.SlateMusic and WG.SlateMusic.GetStatus and WG.SlateMusic.GetStatus()
@@ -122,8 +122,8 @@ local function Refresh()
 
 	local confirm = confirming and CONFIRM[confirming]
 	if confirm then
-		view.SetText("confirm-text", confirm.text)
-		view.SetText("m-confirm-yes", confirm.yes)
+		view.SetText("confirm-text", hud.Escape(confirm.text))
+		view.SetText("m-confirm-yes", hud.Escape(confirm.yes))
 	end
 end
 
@@ -138,12 +138,45 @@ end
 
 local function OnButton(id, handler)
 	hud.OnClick(view, id, function()
-		PlayClickSound()
+		hud.Sound("click")
 		handler()
 	end)
 	local element = view.Element(id)
 	if element then
-		element:AddEventListener("mouseover", PlayHoverSound)
+		element:AddEventListener("mouseover", function() hud.Sound("hover") end)
+	end
+end
+
+-- The game's extra rows, generated into the markup before the resign group.
+local function AddGameEntries()
+	local parts = {}
+	for i, item in ipairs(S.game.menu or {}) do
+		if type(item) == "table" and item.label and item.command then
+			local id = "m-game" .. i
+			local entry = {id = id, command = item.command, playersOnly = item.playersOnly and true or false}
+			if item.confirm then
+				entry.confirmKey = "game" .. i
+				CONFIRM[entry.confirmKey] = {text = item.label .. "?", yes = "Yes, " .. item.label:lower(), command = item.command}
+			end
+			gameEntries[#gameEntries + 1] = entry
+			parts[#parts + 1] = string.format('<div id="%s" class="button quiet%s">%s</div>',
+				id, (#parts == 0) and " group" or "", hud.Escape(item.label))
+		end
+	end
+	if #parts > 0 then
+		view.Element("game-items").inner_rml = table.concat(parts)
+		view.Forget()
+	end
+	for _, entry in ipairs(gameEntries) do
+		OnButton(entry.id, function()
+			if entry.confirmKey then
+				confirming = entry.confirmKey
+				Refresh()
+			else
+				SetOpen(false)
+				Spring.SendCommands(entry.command)
+			end
+		end)
 	end
 end
 
@@ -152,7 +185,8 @@ end
 --------------------------------------------------------------------------------
 
 local function DefaultOrigin(vsx, vsy, w, h, scale)
-	return vsx - w - MARGIN * scale, vsy - h - MARGIN * scale
+	local margin = hud.Margin() * scale
+	return vsx - w - margin, vsy - h - margin
 end
 
 local function Place()
@@ -162,10 +196,15 @@ end
 --------------------------------------------------------------------------------
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Game Menu] " .. tostring(reason))
+		Spring.Echo("[Slate Menu] " .. tostring(reason))
 		widgetHandler:RemoveWidget()
 		return
 	end
@@ -174,6 +213,7 @@ function widget:Initialize()
 	document = result
 
 	view = hud.NewView(document)
+	AddGameEntries() -- first: it replaces markup and forgets what the view assumed
 	view.Assume("menu", "hidden", true)
 	view.Assume("backdrop", "hidden", true)
 	view.Assume("confirm-items", "hidden", true)
@@ -194,6 +234,10 @@ function widget:Initialize()
 	OnButton("m-music-prev", function() if WG.SlateMusic then WG.SlateMusic.Previous() Refresh() end end)
 	OnButton("m-music-pause", function() if WG.SlateMusic then WG.SlateMusic.TogglePause() Refresh() end end)
 	OnButton("m-music-next", function() if WG.SlateMusic then WG.SlateMusic.Next() Refresh() end end)
+	OnButton("m-pause", function()
+		SetOpen(false)
+		Spring.SendCommands("pause")
+	end)
 	OnButton("m-resign", function()
 		confirming = "resign"
 		Refresh()
@@ -215,6 +259,7 @@ function widget:Initialize()
 	end)
 
 	hud.RegisterPanel(LAYOUT_NAME, "Menu", Place)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 
 	Refresh()
@@ -232,9 +277,10 @@ function widget:Shutdown()
 	WG.SlateMenu = nil
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
 	end
 	if document then
-		document:Close()
+		hud.CloseDocument(document)
 		document = nil
 	end
 end

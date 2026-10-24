@@ -1,38 +1,13 @@
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Keybinds window of the RmlUi HUD: rebind keys in game.
---
---  Opened from the game menu (Keybinds) or with /keybinds; Esc or the X closes
---  it. Left click a row and press a key to rebind it (Esc cancels); right
---  click a row to unbind it. If the key is already taken, the window says by
---  what and asks first.
---
---  Changes are written to sf_uikeys.txt in the write dir, which is loaded
---  after the game's own key files; uikeys.txt is never touched.
---
---  The Custom Binds tab holds the player's own named binds. Its editor builds
---  an action line from chips (command, selection source, filters, result;
---  vocabulary in LuaUI/Configs/keybind_actions.lua) or takes one typed by
---  hand, and every row in every tab has an EDIT button that opens the same
---  editor on that bind. Names are kept as "// name:" comments in
---  sf_uikeys.txt, right above the bind they belong to.
---
---  Replaces gui_static_keybinds.lua (kept in Widgets/disabled/). Reading the
---  key files, the edit list and the rebinding itself are carried over
---  unchanged, and so is the WG.SlateKeybinds interface, which the hotbind
---  widget and the game menu use.
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
 
 function widget:GetInfo()
 	return {
 		name    = "Slate Keybinds",
-
-		desc    = "Rebind keys in-game and build custom named binds (selection filters, unit roles...). Writes changes to sf_uikeys.txt in the write dir; never touches uikeys.txt. ",
-		author  = "Scary le Poo; SplinterFaction Team",
-		date    = "2026-10-18",
+		desc    = "Rebind keys in-game and build custom named binds (selection filters, console actions...). Writes changes to <game>_uikeys.txt in the write dir; never touches uikeys.txt.",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
 		license = "GNU GPL, v2 or later",
 		layer   = -100, -- before the game menu, so Esc closes this first
 		enabled = true,
@@ -40,25 +15,54 @@ function widget:GetInfo()
 end
 
 --------------------------------------------------------------------------------
+--
+--  The Keybinds window: rebind keys in game.
+--
+--  Opened from the game menu (Keybinds) or with /keybinds; Esc or the X closes
+--  it. Left click a row and press a key to rebind it (Esc cancels); right
+--  click a row to unbind it. If the key is already taken, the window says by
+--  what and asks first.
+--
+--  Changes are written to <game>_uikeys.txt in the write dir (the file named
+--  by WG.SlateKeybindings.userFile), which is loaded after the game's own key
+--  file; uikeys.txt is never touched.
+--
+--  The Game tab lists the binds of luaui/configs/<game>_keys.txt, section by
+--  section, and is hidden when the game has no such file. The Custom Binds
+--  tab holds the player's own named binds. Its editor builds an action line
+--  from chips (command, selection source, filters, result; vocabulary in
+--  luaui/slate/configs/slate_keybind_actions.lua) or takes one typed by hand,
+--  and every row in every tab has an EDIT button that opens the same editor
+--  on that bind. Names are kept as "// name:" comments in the user file,
+--  right above the bind they belong to.
+--
+--  WG.SlateKeybinds is the one way to change that file at runtime; the
+--  hotbind widget and the game menu go through it.
+--
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 -- config
 --------------------------------------------------------------------------------
 
 local DOCUMENT_PATH = "keybinds.rml"
 
--- Overridden from WG.SlateKeybindings when the loader widget is present
-local GAME_KEYS_FILE = "luaui/configs/sf_keys.txt"
-local USER_KEYS_FILE = "sf_uikeys.txt"
+-- The same names as in slate_api_keybindings.lua, which owns them; taken from
+-- WG.SlateKeybindings when that widget is running, so the two never disagree.
+local shortName = (Game.gameShortName or Game.modShortName or "game"):lower():gsub("[^%w_]", "")
+local GAME_KEYS_FILE = "luaui/configs/" .. shortName .. "_keys.txt"
+local USER_KEYS_FILE = shortName .. "_uikeys.txt"
 
 -- must match #keybinds in keybinds.rml
 local PANEL_WIDTH  = 720
 local PANEL_HEIGHT = 700
 
--- chip vocabulary and selection-line parser, shared with gui_sf_select.lua
-local ACTIONS_FILE = "LuaUI/Configs/keybind_actions.lua"
+-- chip vocabulary and selection-line parser, shared with slate_select.lua
+local ACTIONS_FILE = LUAUI_DIRNAME .. "slate/configs/slate_keybind_actions.lua"
 
 local PICKER_MAX = 200 -- options listed at once in the value picker
 
-local LAYOUT_NAME = "keybinds" -- same as the old widget, so a saved position carries over
+local LAYOUT_NAME = "slate_keybinds"
 
 local STATUS_TIME = 6 -- seconds a status message stays up
 local CONFIRM_MAX = 6 -- max conflict lines listed in the dialog
@@ -77,11 +81,10 @@ local spGetKeySymbol     = Spring.GetKeySymbol
 local spGetKeyBindings   = Spring.GetKeyBindings
 local spGetActionHotKeys = Spring.GetActionHotKeys
 local spSendCommands     = Spring.SendCommands
-local spPlaySoundFile    = Spring.PlaySoundFile
 
 local math_min = math.min
 
-local hud
+local hud, S
 local document
 local view
 local lastUpdate
@@ -94,11 +97,12 @@ local FocusField -- defined with the text fields; the editor and picker call it
 
 local isOpen = false
 
-local tab  = "sf" -- "sf" | "all" | "custom"
-local TABS = {"sf", "all", "custom"}
+local tab  = "game" -- "game" | "all" | "custom"
+local TABS = {"game", "all", "custom"}
 
-local sfSections = {}  -- ordered {title = , actions = {line, ...}}
-local sfKnown    = {}  -- line -> true
+local gameSections = {}  -- ordered {title = , actions = {line, ...}}
+local gameKnown    = {}  -- line -> true
+local hasGameFile  = false -- the Game tab is only offered when the file exists
 local items      = {}  -- flat display list: {kind = "header" | "row", ...}; item i has the id "k<i>"
 local listDirty  = true
 
@@ -130,15 +134,11 @@ local MOD_KEYS = {
 -- small helpers
 --------------------------------------------------------------------------------
 
-local function PlayClickSound() spPlaySoundFile("leftclick", 1.0, "ui") end
+local function PlayClickSound() hud.Sound("click") end
 
 local function SetStatus(text, color)
 	status = {text = text, color = color or COL.textDim, expires = os.clock() + STATUS_TIME}
 end
-
---------------------------------------------------------------------------------
--- everything from here to "showing" is carried over unchanged
---------------------------------------------------------------------------------
 
 local function Trim(s)
 	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
@@ -153,7 +153,7 @@ local function ActionLine(command, extra)
 end
 
 --------------------------------------------------------------------------------
--- sf_keys.txt parsing (section titles + the action lines it binds)
+-- <game>_keys.txt parsing (section titles + the action lines it binds)
 --------------------------------------------------------------------------------
 
 -- Strips "//" comments the same way the engine's line parser does
@@ -164,13 +164,17 @@ local function StripComment(line)
 end
 
 local function ParseGameKeysFile()
-	sfSections = {}
-	sfKnown    = {}
+	gameSections = {}
+	gameKnown    = {}
 
 	-- archive only, like the loader: a loose copy must not change what is listed
 	local text = VFS.FileExists(GAME_KEYS_FILE, VFS.ZIP) and VFS.LoadFile(GAME_KEYS_FILE, VFS.ZIP)
+	hasGameFile = text and true or false
 	if not text then
-		SetStatus("could not read " .. GAME_KEYS_FILE, COL.err)
+		-- a game without its own key file simply has no Game tab
+		if tab == "game" then
+			tab = "all"
+		end
 		return
 	end
 
@@ -207,9 +211,9 @@ local function ParseGameKeysFile()
 					local keyset, action = rest:match("^(%S+)%s+(.+)$")
 					if keyset and action then
 						action = Trim(action)
-						if not sfKnown[action] then
-							sfKnown[action] = true
-							local sec = current or Section("SF Keybinds")
+						if not gameKnown[action] then
+							gameKnown[action] = true
+							local sec = current or Section("Game keybinds")
 							sec.actions[#sec.actions + 1] = action
 						end
 					end
@@ -221,22 +225,22 @@ local function ParseGameKeysFile()
 	-- Drop headers that ended up with no bindings under them
 	for i = 1, #sections do
 		if #sections[i].actions > 0 then
-			sfSections[#sfSections + 1] = sections[i]
+			gameSections[#gameSections + 1] = sections[i]
 		end
 	end
 end
 
 --------------------------------------------------------------------------------
--- sf_uikeys.txt: the edit list is the file, the file is the edit list
+-- <game>_uikeys.txt: the edit list is the file, the file is the edit list
 --------------------------------------------------------------------------------
 
 local FILE_HEADER = table.concat({
 	"//",
-	"//  Splinter Faction user keybindings",
-	"//  Generated by the Static Keybinds widget -- edits made in-game land here.",
+	"//  " .. (Game.gameName or shortName) .. " user keybindings",
+	"//  Generated by the Slate Keybinds widget -- edits made in-game land here.",
 	"//",
-	"//  Loaded after the game's key files, so unbind lines below can remove",
-	"//  SF and engine defaults and bind lines can replace them.",
+	"//  Loaded after the game's key file, so unbind lines below can remove",
+	"//  game and engine defaults and bind lines can replace them.",
 	"//",
 	"//  Hand edits survive as long as they use plain bind / unbind lines. A",
 	"//  \"// name: ...\" comment right above a bind line names it in the",
@@ -334,7 +338,7 @@ end
 -- never matches anything: only argument-less actions can be named. So a line
 -- is removed by unbinding its verb on that keyset, and every other action with
 -- the same verb on that keyset is bound again right after. Both steps are
--- recorded, so sf_uikeys.txt replays to the same state.
+-- recorded, so the user file replays to the same state.
 --   lines: set { [actionLine] = true } of the lines to remove from keyset
 local function UnbindLines(keyset, lines)
 	local verbs, keep = {}, {}
@@ -423,7 +427,7 @@ end
 -- what the Custom Binds tab lists: named binds, and selection binds of the
 -- player's own making
 local function IsCustomLine(a)
-	return names[a] ~= nil or a:match("^sfselect") ~= nil or (a:match("^select ") ~= nil and not sfKnown[a])
+	return names[a] ~= nil or a:match("^slateselect") ~= nil or (a:match("^select ") ~= nil and not gameKnown[a])
 end
 
 local function AddRow(line, label)
@@ -438,23 +442,23 @@ end
 local function BuildList()
 	items = {}
 
-	if tab == "sf" then
-		for i = 1, #sfSections do
-			local sec = sfSections[i]
+	if tab == "game" then
+		for i = 1, #gameSections do
+			local sec = gameSections[i]
 			items[#items + 1] = { kind = "header", label = sec.title }
 			for j = 1, #sec.actions do
 				AddRow(sec.actions[j])
 			end
 		end
 
-		-- Runtime hotbinds live in sf_uikeys.txt but have no section in
-		-- sf_keys.txt, so synthesize one for them. Walking the edit list is
+		-- Runtime hotbinds live in the user file but have no section in the
+		-- game's key file, so synthesize one for them. Walking the edit list is
 		-- cheap and only happens when the panel is open and the list is dirty.
 		-- (Custom binds have their own tab.)
 		local extra, seenExtra = {}, {}
 		for i = 1, #edits do
 			local e = edits[i]
-			if e.op == "bind" and not sfKnown[e.action] and not seenExtra[e.action] and not IsCustomLine(e.action) then
+			if e.op == "bind" and not gameKnown[e.action] and not seenExtra[e.action] and not IsCustomLine(e.action) then
 				seenExtra[e.action] = true
 				extra[#extra + 1] = e.action
 			end
@@ -468,7 +472,7 @@ local function BuildList()
 		end
 
 		if #items == 0 then
-			items[#items + 1] = { kind = "header", label = "no bindings found in sf_keys.txt" }
+			items[#items + 1] = { kind = "header", label = "no bindings found in " .. GAME_KEYS_FILE }
 		end
 	elseif tab == "custom" then
 		items[#items + 1] = { kind = "new", label = "+   New custom bind" }
@@ -621,12 +625,12 @@ local function FinishCapture(keyset)
 end
 
 local function ReapplyKeys()
-	-- The loader owns the bind table (it drops uikeys.txt and rebuilds from
-	-- the game file, engine defaults and sf_uikeys.txt). Without it there is
-	-- no safe way to rebuild here: keyload only appends, keyreload brings back
-	-- the shared uikeys.txt.
+	-- The loader owns the bind table (it rebuilds from the game file, the
+	-- engine defaults and the user file). Without it there is no safe way to
+	-- rebuild here: keyload only appends, keyreload brings back the shared
+	-- uikeys.txt.
 	if not (WG.SlateKeybindings and WG.SlateKeybindings.Apply) then
-		SetStatus("SF Keybindings widget is not running; cannot reload binds", COL.err)
+		SetStatus("Slate Keybindings widget is not running; cannot reload binds", COL.err)
 		return false
 	end
 	WG.SlateKeybindings.Apply()
@@ -640,7 +644,7 @@ local function ResetAll()
 	editedLine = {}
 	SaveEdits()
 
-	-- sf_uikeys.txt is now empty, so a rebuild leaves SF binds + engine defaults
+	-- the user file is now empty, so a rebuild leaves the game's binds + engine defaults
 	if ReapplyKeys() then
 		SetStatus("all rebinds cleared", COL.warn)
 	end
@@ -650,7 +654,7 @@ end
 --------------------------------------------------------------------------------
 -- Public API  (exported as WG.SlateKeybinds in Initialize)
 --
--- sf_uikeys.txt has exactly one writer: this widget. Anything that wants to
+-- The user file has exactly one writer: this widget. Anything that wants to
 -- change a binding at runtime -- the hotbind widget, for instance -- goes
 -- through here rather than opening the file itself, so that every change lands
 -- in the same in-memory edit list, gets the same conflict handling, shows up in
@@ -699,19 +703,6 @@ end
 --   isUser   = bool,          -- the original is one of the player's own binds
 -- }
 --------------------------------------------------------------------------------
-
--- like hud.EventAttribute, for a string attribute
-local function EventString(event, attribute)
-	local element = event.target_element
-	for _ = 1, 10 do
-		if not element then return nil end
-		if element:HasAttribute(attribute) then
-			return element:GetAttribute(attribute)
-		end
-		element = element.parent_node
-	end
-	return nil
-end
 
 -- UTF-8 helpers for the text fields (Lua 5.1 has no utf8 library)
 local function Utf8Len(s)
@@ -791,7 +782,7 @@ local function SyncChipsFromLine()
 	local word, rest = line:match("^(%S+)%s*(.*)$")
 	if word then
 		local lower = word:lower()
-		if lower == "select" or lower == "sfselect" then
+		if lower == "select" or lower == "slateselect" then
 			e.manual = true -- a selection that does not parse: keep as typed
 			return
 		end
@@ -1118,12 +1109,12 @@ local function SaveEditor()
 		return
 	end
 	local verb, spec = actions.Parse(line)
-	if (verb == "select" or verb == "sfselect") and not spec then
+	if (verb == "select" or verb == "slateselect") and not spec then
 		SetStatus("that selection line does not parse; check the filters", COL.err)
 		return
 	end
 	if spec then
-		line = actions.Format(spec) -- normalized; picks select or sfselect
+		line = actions.Format(spec) -- normalized; picks select or slateselect
 	end
 
 	local orig = e.original
@@ -1159,8 +1150,8 @@ local function SaveEditor()
 		SaveEdits()
 		SetStatus(keyset .. "  ->  " .. ((name ~= "") and name or line), COL.ok)
 		CloseEditor()
-		if spec and not actions.IsEngineNative(spec) and not WG.SFSelect then
-			SetStatus("saved, but the SF Select widget is not running, so this bind will do nothing", COL.warn)
+		if spec and not actions.IsEngineNative(spec) and not WG.SlateSelect then
+			SetStatus("saved, but the Slate Select widget is not running, so this bind will do nothing", COL.warn)
 		end
 	end
 
@@ -1178,7 +1169,7 @@ local function SaveEditor()
 	OpenConfirm(keyset .. " is already bound to:", lines, Commit)
 end
 
--- Removes the bind being edited: its keys are unbound (recorded, so an SF or
+-- Removes the bind being edited: its keys are unbound (recorded, so a game or
 -- engine bind stays unbound) and its own bind lines leave the file.
 local function DeleteEditor()
 	local orig = editor and editor.original
@@ -1285,7 +1276,7 @@ local function RenderEditor()
 		hint = "This selection line does not parse. It is saved as typed; fix it or click a chip to start over."
 	elseif builder and e.spec then
 		hint = actions.IsEngineNative(e.spec) and "Runs through the engine's own select."
-			or "Uses SF filters, so it runs through sfselect (the SF Select widget)."
+			or "Uses Slate filters, so it runs through slateselect (the Slate Select widget)."
 	elseif e.verb == "" then
 		hint = "Any console action, e.g. luaui showhealthbars, or a unit's buildunit_<name>."
 	else
@@ -1333,7 +1324,7 @@ end
 local function OnEditorMouseDown(event)
 	if not editor or confirm or picker then return end
 	local button = event.parameters and event.parameters.button
-	local act = EventString(event, "data-act")
+	local act = hud.EventString(event, "data-act")
 	if capture and capture.editorKey and act ~= "capture" then
 		capture = nil
 	end
@@ -1377,7 +1368,7 @@ end
 local function OnPickerMouseDown(event)
 	if not picker then return end
 	local button = event.parameters and event.parameters.button
-	local act = EventString(event, "data-act")
+	local act = hud.EventString(event, "data-act")
 	if act == "field:pick" then
 		FocusField("pick")
 	elseif act == "pick-ok" and button == 0 then
@@ -1416,7 +1407,8 @@ Refresh = function()
 	if not isOpen then
 		return
 	end
-	view.SetClass("tab-sf", "active", tab == "sf")
+	view.SetClass("tab-game", "hidden", not hasGameFile)
+	view.SetClass("tab-game", "active", tab == "game")
 	view.SetClass("tab-all", "active", tab == "all")
 	view.SetClass("tab-custom", "active", tab == "custom")
 
@@ -1594,7 +1586,7 @@ local function AskReset()
 		return
 	end
 	OpenConfirm("Clear all " .. #edits .. " rebinds from " .. USER_KEYS_FILE .. "?", {
-		"Keys return to SF defaults plus your uikeys.txt.",
+		"Keys return to the game's defaults plus your uikeys.txt.",
 	}, ResetAll)
 	confirm.note = "This cannot be undone."
 end
@@ -1604,15 +1596,20 @@ end
 --------------------------------------------------------------------------------
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		Spring.Echo("[Keybinds] " .. tostring(reason))
+		Spring.Echo("[Slate Keybinds] " .. tostring(reason))
 		widgetHandler:RemoveWidget()
 		return
 	end
 	hud = helpers
-	hud.showInPregame = true -- a window the player opens; usable during faction choice and placement
+	hud.showInPregame = true -- a window the player opens; usable during a pregame flow and placement
 	document = result
 
 	if WG.SlateKeybindings then
@@ -1620,9 +1617,10 @@ function widget:Initialize()
 		USER_KEYS_FILE = WG.SlateKeybindings.userFile or USER_KEYS_FILE
 	end
 
-	actions = VFS.Include(ACTIONS_FILE, nil, VFS.ZIP)
+	-- RAW_FIRST: a game's edited copy in the write dir wins over the archive's
+	actions = VFS.Include(ACTIONS_FILE, nil, VFS.RAW_FIRST)
 	if type(actions) ~= "table" or not actions.Parse then
-		Spring.Echo("[Keybinds] could not load " .. ACTIONS_FILE)
+		Spring.Echo("[Slate Keybinds] could not load " .. ACTIONS_FILE)
 		widgetHandler:RemoveWidget()
 		return
 	end
@@ -1643,7 +1641,7 @@ function widget:Initialize()
 		-- (a click on a row has just been dealt with by the list, below; the
 		-- editor's own key badge keeps its capture)
 		if capture and capture.editorKey then
-			if EventString(event, "data-act") ~= "capture" then
+			if hud.EventString(event, "data-act") ~= "capture" then
 				capture = nil
 				SetStatus("key capture cancelled", COL.textDim)
 				Refresh()
@@ -1711,6 +1709,7 @@ function widget:Initialize()
 	}
 
 	hud.RegisterPanel(LAYOUT_NAME, "Keybinds", Place, function() return isOpen end)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 
 	hud.ShowPassive(document)
@@ -1724,9 +1723,8 @@ function widget:Shutdown()
 	end
 	if hud then
 		hud.UnregisterPanel(LAYOUT_NAME)
-	end
-	if document then
-		document:Close()
+		hud.OffChange(LAYOUT_NAME)
+		hud.CloseDocument(document)
 		document = nil
 	end
 end
@@ -1876,7 +1874,7 @@ function widget:GetConfigData()
 end
 
 function widget:SetConfigData(data)
-	if data and (data.tab == "sf" or data.tab == "all" or data.tab == "custom") then
+	if data and (data.tab == "game" or data.tab == "all" or data.tab == "custom") then
 		tab = data.tab
 	end
 end
