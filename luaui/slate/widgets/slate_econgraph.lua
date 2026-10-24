@@ -1,7 +1,21 @@
+-- Part of Slate, a game-neutral RmlUi interface for Total Annihilation style
+-- games on the Recoil engine. Derived from the Bastion HUD in Splinter
+-- Faction (same author, GPL v2+).
+
+function widget:GetInfo()
+	return {
+		name    = "Slate Economy Graph",
+		desc    = "Where is my metal/energy going? Stacked per-unit expense (or income) over time with the other side of the ledger drawn as a line, plus a live breakdown bar. Open from the game menu, WG.SlateEconGraph, or /econgraph.",
+		author  = "Scary le Poo",
+		date    = "2026-10-24",
+		license = "GNU GPL, v2 or later",
+		layer   = -500,
+		enabled = true,
+	}
+end
+
 --------------------------------------------------------------------------------
---------------------------------------------------------------------------------
---
---  Economy graph of the RmlUi HUD: where is my metal or energy going?
+--  Economy graph: where is my metal or energy going?
 --
 --  Stacked per-unit expense (or income) over time, with the other side of the
 --  ledger drawn as a line over it, and two bars showing the breakdown of this
@@ -11,30 +25,9 @@
 --  The window is RmlUi. The plot itself (up to 360 columns of up to 11 bands,
 --  and the line) is drawn with gl: the engine draws gl under RmlUi, so the
 --  window leaves a hole where the plot goes (see econgraph.rml) and
---  DrawScreen fills it. The gl drawing goes through WG.StaticGUI
---  (api_staticgui_shapes.lua) when that is running, which batches it and
---  keeps it in a texture between the once-a-second refreshes.
+--  DrawScreen fills it. The plot is baked into a display list and only
+--  rebuilt when the data or the window moves.
 --
---  Replaces gui_static_econgraph.lua (kept in Widgets/disabled/). The
---  sampling and the building of the view are carried over unchanged.
---
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
-
-function widget:GetInfo()
-	return {
-		name    = "Slate Economy Graph",
-
-		desc    = "Where is my metal/energy going? Stacked per-unit expense (or income) over time with the other side of the ledger drawn as a line, plus a live breakdown bar. Open from the game menu, WG.SlateEconGraph, or /econgraph. ",
-		author  = "Scary le Poo",
-		date    = "2026-10-13",
-		license = "GNU GPL, v2 or later",
-		layer   = -500,
-		enabled = true,
-	}
-end
-
---------------------------------------------------------------------------------
 -- HOW THE NUMBERS ARE OBTAINED
 --
 -- Spring.GetUnitResources(unitID) returns metalMake, metalUse, energyMake,
@@ -59,9 +52,9 @@ end
 --
 -- Construction spend is charged to the builder but the question the player is
 -- asking is "what am I spending it ON", so a builder's use is re-keyed to the
--- unitDef of whatever Spring.GetUnitIsBuilding says it is building. SF has no
--- build assist, so every target has exactly one builder and this is exact.
--- Morphs are re-keyed to the target def via the unit_morph MorphUpdate
+-- unitDef of whatever Spring.GetUnitIsBuilding says it is building. Several
+-- builders assisting one target all land on that target, so the sum stays
+-- exact. Morphs are re-keyed to the target def via the unit_morph MorphUpdate
 -- broadcast when this widget can claim that global (another widget may own
 -- it; then a morphing unit's spend simply stays on the unit itself).
 --------------------------------------------------------------------------------
@@ -80,7 +73,7 @@ local PLOT_HEIGHT  = 520 -- #plotrow
 local BAR_WIDTH    = 898 -- inside of a .live bar
 local END_LABEL_GAP = 13 -- least distance between the two labels right of the plot
 
-local LAYOUT_ID = "econgraph" -- same as the old widget, so a saved position carries over
+local LAYOUT_NAME = "slate_econgraph"
 
 local GRID_DIVS     = 5
 local LINE_WIDTH    = 2.5
@@ -89,11 +82,9 @@ local MAX_SAMPLES   = 3 * 3600   -- 3h at 1 Hz, then the oldest are dropped
 local TOP_N         = 9      -- bands shown by name; the rest fold into "Everything else"
 
 -- Selector definitions. Order = button order; the buttons themselves are in
--- econgraph.rml as res1.., mode1.., group1.., win1..
-local RESOURCES = {
-	{ key = "m", label = "Metal"  },
-	{ key = "e", label = "Energy" },
-}
+-- econgraph.rml as mode1.., group1.., win1..; the resource buttons (res1..)
+-- are generated from WG.Slate.game.resources, which fills RESOURCES.
+local RESOURCES = {}  -- { key = "metal", label = "Metal", color = "#..." }
 local MODES = {
 	{ key = "use",  label = "Expense", line = "Income"  },
 	{ key = "make", label = "Income",  line = "Expense" },
@@ -110,6 +101,10 @@ local WINDOWS = {
 }
 local GROUP_DEFS = { res = RESOURCES, mode = MODES, group = GROUPINGS, win = WINDOWS }
 
+-- Which of Spring.GetUnitResources' four returns (make, use) belong to a
+-- resource key. The engine only tracks these two per unit.
+local UNIT_RESOURCE_SLOTS = { metal = { 1, 2 }, energy = { 3, 4 } }
+
 -- Sentinel bucket keys (never collide with a unitDefID)
 local KEY_OTHER  = "__other"     -- team-level spend the engine attaches to no unit
 local KEY_REST   = "__rest"      -- fold of everything outside the top N
@@ -124,24 +119,24 @@ local CATEGORIES = {
 	{ key = "army",    label = "Army units",    color = {0.90, 0.30, 0.35, 1} },
 	{ key = "defense", label = "Defenses",      color = {0.65, 0.40, 0.90, 1} },
 	{ key = "struct",  label = "Other buildings", color = {0.40, 0.70, 0.70, 1} },
-	{ key = "upgrade", label = "Upgrades",      color = {0.95, 0.55, 0.85, 1} },
+	{ key = "morph",   label = "Morphs",        color = {0.95, 0.55, 0.85, 1} },
 	{ key = "other",   label = "Unattributed",  color = {0.55, 0.55, 0.58, 1} },
 }
 local COLOR_OTHER = {0.55, 0.55, 0.58, 1}
 local COLOR_REST  = {0.38, 0.38, 0.42, 1}
 
--- gl colors of the plot
-local HOLE_BG    = {0.043, 0.055, 0.071, 0.92} -- the panel color, as in theme.rcss
-local PLOT_BG    = {0.02, 0.03, 0.04, 0.55}
-local GRID_COLOR = {1.0, 1.0, 1.0, 0.07}
-local LINE_COLOR = {1.0, 1.0, 1.0, 0.95}       -- the "other side" overlay line
+-- gl colors of the plot (the Slate palette; the hole's own colour comes from
+-- the theme at bake time so it matches the tinted window around it)
+local PLOT_BG    = {0.0, 0.0, 0.0, 0.25}
+local GRID_COLOR = {1.0, 1.0, 1.0, 0.08}
+local LINE_COLOR = {0.851, 0.467, 0.192, 1.0}  -- #d97731: the "other side" overlay line
+local LINE_HALO  = {0.0, 0.0, 0.0, 0.55}
 
 --------------------------------------------------------------------------------
 -- speedups
 --------------------------------------------------------------------------------
 
 local spGetMouseState     = Spring.GetMouseState
-local spPlaySoundFile     = Spring.PlaySoundFile
 local spGetMyTeamID       = Spring.GetMyTeamID
 local spGetTeamUnits      = Spring.GetTeamUnits
 local spGetUnitResources  = Spring.GetUnitResources
@@ -150,6 +145,16 @@ local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
 local spGetTeamResources  = Spring.GetTeamResources
 local spGetGameSeconds    = Spring.GetGameSeconds
 local spEcho              = Spring.Echo
+
+local glColor      = gl.Color
+local glRect       = gl.Rect
+local glLineWidth  = gl.LineWidth
+local glBeginEnd   = gl.BeginEnd
+local glVertex     = gl.Vertex
+local glCreateList = gl.CreateList
+local glCallList   = gl.CallList
+local glDeleteList = gl.DeleteList
+local GL_LINE_STRIP = GL.LINE_STRIP
 
 local math_floor = math.floor
 local math_max   = math.max
@@ -162,55 +167,10 @@ local function Clamp(v, lo, hi)
 end
 
 --------------------------------------------------------------------------------
--- gl drawing: through WG.StaticGUI when it is there (batched, and cached in a
--- texture), plain gl with a display list otherwise
---------------------------------------------------------------------------------
-
-local glColor, glRect, LineStrip, Flush
-local TexCache, DrawCache, FreeCache
-
-local function PlainLineStrip(points, width, color)
-	local n = #points
-	if n < 4 then return end
-	if color then gl.Color(color[1], color[2], color[3], color[4] or 1) end
-	gl.LineWidth(width or 1)
-	gl.BeginEnd(GL.LINE_STRIP, function()
-		for i = 1, n - 1, 2 do
-			gl.Vertex(points[i], points[i + 1])
-		end
-	end)
-	gl.LineWidth(1)
-end
-
-local function BindDrawing()
-	local SG = WG.StaticGUI
-	if SG then
-		glColor   = SG.Color
-		glRect    = SG.Rect
-		LineStrip = SG.LineStrip
-		Flush     = SG.Flush
-		TexCache  = SG.TexCache
-		DrawCache = SG.DrawCache
-		FreeCache = SG.FreeCache
-	else
-		glColor   = gl.Color
-		glRect    = gl.Rect
-		LineStrip = PlainLineStrip
-		Flush     = function() end
-		TexCache  = function(cache, _, _, _, _, fn)
-			if cache then gl.DeleteList(cache) end
-			return gl.CreateList(fn)
-		end
-		DrawCache = function(cache) if cache then gl.CallList(cache) end end
-		FreeCache = function(cache) if cache then gl.DeleteList(cache) end end
-	end
-end
-
---------------------------------------------------------------------------------
 -- state
 --------------------------------------------------------------------------------
 
-local hud
+local hud, S
 local document
 local page          -- the hud view of the document ("view" is the data view below)
 
@@ -226,9 +186,9 @@ local hidden = { unit = {}, cat = {} }
 
 -- Sampler ---------------------------------------------------------------------
 -- samples[i] = { t = gameSeconds,
---                use  = { m = {key=v}, e = {key=v} },
---                make = { m = {key=v}, e = {key=v} },
---                tot  = { mUse, mMake, eUse, eMake } }
+--                use  = { [resKey] = {bucketKey = v} },
+--                make = { [resKey] = {bucketKey = v} },
+--                tot  = { [resKey] = { use = n, make = n } } }
 local samples    = {}
 local sampleN    = 0
 local morphing   = {}       -- [unitID] = "morph:<targetDefID>" from MorphUpdate
@@ -253,21 +213,18 @@ local view = {
 	enough   = false,
 }
 
-local plotCache   = nil   -- the baked plot (TexCache)
+local plotList    = nil   -- the baked plot (a display list)
 local plotDirty   = true
 local pageDirty   = true  -- the RmlUi side needs restating
 local legendMarkup
 local plotHover   = false -- the mouse is on #plot (told by RmlUi)
 local hoverCol    = nil   -- column of the plot under the mouse
 local hoverSeg    = nil   -- {bar = 1 | 2, index = } segment of a bar under the mouse
-local tipText     = nil
+local guiHidden   = false
 
 --------------------------------------------------------------------------------
--- sound, formatting
+-- formatting
 --------------------------------------------------------------------------------
-
-local function PlayHoverSound() spPlaySoundFile("hover",     1.0, "ui") end
-local function PlayClickSound() spPlaySoundFile("leftclick", 1.0, "ui") end
 
 local function numFormat(value)
 	value = value or 0
@@ -325,7 +282,7 @@ end
 local function DefName(udid)
 	local ud = UnitDefs[udid]
 	if not ud then return "Unit " .. tostring(udid) end
-	return ud.translatedHumanName or ud.humanName or ud.name
+	return hud.UnitName(ud)
 end
 
 local catByDef = {}
@@ -337,8 +294,7 @@ local function CategoryOf(udid)
 	elseif (ud.extractsMetal or 0) > 0 then c = "extract"
 	elseif ud.isFactory then c = "factory"
 	elseif ud.isBuilder and ud.canMove then c = "builder"
-	elseif (ud.energyMake or 0) > 0 or ud.windGenerator and ud.windGenerator > 0
-	    or ud.tidalGenerator and ud.tidalGenerator > 0 or (ud.customParams and ud.customParams.rp_income) then
+	elseif (ud.energyMake or 0) > 0 or (ud.windGenerator or 0) > 0 or (ud.tidalGenerator or 0) > 0 then
 		c = "power"
 	elseif ud.isBuilding or ud.isImmobile then
 		c = (ud.weapons and #ud.weapons > 0) and "defense" or "struct"
@@ -362,12 +318,12 @@ local function Resolve(rawKey)
 	local isMorph = (type(rawKey) == "string")
 	local udid = isMorph and tonumber(rawKey:sub(#MORPH_PREFIX + 1)) or rawKey
 	if grouping == "cat" then
-		local ck = isMorph and "upgrade" or CategoryOf(udid)
+		local ck = isMorph and "morph" or CategoryOf(udid)
 		local cd = catDef[ck] or catDef.other
 		return "cat:" .. ck, cd.label, cd.color
 	end
 	if isMorph then
-		return rawKey, "Upgrade to " .. DefName(udid), DefColor(udid)
+		return rawKey, "Morph to " .. DefName(udid), DefColor(udid)
 	end
 	return udid, DefName(udid), DefColor(udid)
 end
@@ -381,13 +337,17 @@ local function TakeSample()
 	local units  = spGetTeamUnits(teamID)
 	if not units then return end
 
-	local useM, useE, makeM, makeE = {}, {}, {}, {}
-	local sumUM, sumUE, sumMM, sumME = 0, 0, 0, 0
+	local use, make, sumUse, sumMake = {}, {}, {}, {}
+	for r = 1, #RESOURCES do
+		local key = RESOURCES[r].key
+		use[key], make[key], sumUse[key], sumMake[key] = {}, {}, 0, 0
+	end
 
+	local returns = {}
 	for i = 1, #units do
 		local u = units[i]
-		local mM, mU, eM, eU = spGetUnitResources(u)
-		if mM then
+		returns[1], returns[2], returns[3], returns[4] = spGetUnitResources(u)
+		if returns[1] then
 			local udid = spGetUnitDefID(u)
 			if udid then
 				-- What is this unit spending ON?
@@ -399,36 +359,44 @@ local function TakeSample()
 				elseif morphing[u] then
 					useKey = morphing[u]
 				end
-				if mU > 0 then useM[useKey] = (useM[useKey] or 0) + mU ; sumUM = sumUM + mU end
-				if eU > 0 then useE[useKey] = (useE[useKey] or 0) + eU ; sumUE = sumUE + eU end
-				-- Income is always the unit's own doing (mex, solar, reclaim by a builder)
-				if mM > 0 then makeM[udid] = (makeM[udid] or 0) + mM ; sumMM = sumMM + mM end
-				if eM > 0 then makeE[udid] = (makeE[udid] or 0) + eM ; sumME = sumME + eM end
+				for r = 1, #RESOURCES do
+					local key = RESOURCES[r].key
+					local slots = UNIT_RESOURCE_SLOTS[key]
+					if slots then
+						local made, used = returns[slots[1]] or 0, returns[slots[2]] or 0
+						if used > 0 then
+							use[key][useKey] = (use[key][useKey] or 0) + used
+							sumUse[key] = sumUse[key] + used
+						end
+						-- Income is always the unit's own doing (mex, solar, reclaim by a builder)
+						if made > 0 then
+							make[key][udid] = (make[key][udid] or 0) + made
+							sumMake[key] = sumMake[key] + made
+						end
+					end
+				end
 			end
 		end
 	end
 
 	-- Team totals are ground truth; whatever the per-unit walk did not see is
 	-- team-level (Spring.UseTeamResource / AddTeamResource) and gets its own band.
-	local _, _, _, incM, expM = spGetTeamResources(teamID, "metal")
-	local _, _, _, incE, expE = spGetTeamResources(teamID, "energy")
-	incM, expM, incE, expE = incM or 0, expM or 0, incE or 0, expE or 0
-
-	-- Unit windows are staggered relative to the team window, so tiny negative
-	-- residues are normal noise; only a real gap becomes a band.
-	local r
-	r = expM - sumUM ; if r > 0.5 then useM[KEY_OTHER]  = r end
-	r = expE - sumUE ; if r > 0.5 then useE[KEY_OTHER]  = r end
-	r = incM - sumMM ; if r > 0.5 then makeM[KEY_OTHER] = r end
-	r = incE - sumME ; if r > 0.5 then makeE[KEY_OTHER] = r end
+	local tot = {}
+	for r = 1, #RESOURCES do
+		local key = RESOURCES[r].key
+		local _, _, _, income, expense = spGetTeamResources(teamID, key)
+		income, expense = income or 0, expense or 0
+		tot[key] = { use = expense, make = income }
+		-- Unit windows are staggered relative to the team window, so tiny negative
+		-- residues are normal noise; only a real gap becomes a band.
+		local gap = expense - sumUse[key]
+		if gap > 0.5 then use[key][KEY_OTHER] = gap end
+		gap = income - sumMake[key]
+		if gap > 0.5 then make[key][KEY_OTHER] = gap end
+	end
 
 	sampleN = sampleN + 1
-	samples[sampleN] = {
-		t    = spGetGameSeconds(),
-		use  = { m = useM,  e = useE  },
-		make = { m = makeM, e = makeE },
-		tot  = { mUse = expM, mMake = incM, eUse = expE, eMake = incE },
-	}
+	samples[sampleN] = { t = spGetGameSeconds(), use = use, make = make, tot = tot }
 
 	if sampleN > MAX_SAMPLES then
 		-- Drop the oldest quarter in one go rather than shifting every second.
@@ -477,8 +445,6 @@ local function RefreshView()
 	local lineCols = {}
 	for c = 1, nCols do lineCols[c] = 0 end
 
-	local totField = ((resKey == "m") and "m" or "e") .. ((lineKey == "use") and "Use" or "Make")
-
 	for i = first, sampleN do
 		local s   = samples[i]
 		local col = math_floor((i - first) / colSpan) + 1
@@ -495,7 +461,7 @@ local function RefreshView()
 			b.total = b.total + v
 			if i == sampleN then b.cur = b.cur + v end
 		end
-		lineCols[col] = lineCols[col] + s.tot[totField]
+		lineCols[col] = lineCols[col] + s.tot[resKey][lineKey]
 	end
 
 	-- Per-column values are sums over colSpan samples; normalise to per-second
@@ -581,7 +547,7 @@ local function RefreshView()
 	table.sort(view.live, function(a, b) return a.cur > b.cur end)
 
 	-- The overlay side's live breakdown, built ad hoc (it has no bucket list)
-	view.curLine = last.tot[totField]
+	view.curLine = last.tot[resKey][lineKey]
 	local liveLine, lbk = {}, {}
 	for rawKey, v in pairs(last[lineKey][resKey]) do
 		local bk, label, color = Resolve(rawKey)
@@ -618,9 +584,31 @@ local function ReadPlotRect()
 	return { x1 = left, y1 = vsy - (top + h), x2 = left + w, y2 = vsy - top }
 end
 
+-- points = {x1, y1, x2, y2, ...}. Wide lines are not guaranteed by every GL
+-- driver (core profile clamps to 1), so a 1px line is the worst case.
+local function LineStrip(points, width, color)
+	local n = #points
+	if n < 4 then return end
+	glColor(color[1], color[2], color[3], color[4] or 1)
+	glLineWidth(width or 1)
+	glBeginEnd(GL_LINE_STRIP, function()
+		for i = 1, n - 1, 2 do
+			glVertex(points[i], points[i + 1])
+		end
+	end)
+	glLineWidth(1)
+end
+
+-- The hole first takes the window's own colour, so the plot sits on the same
+-- tinted glass as the rest of the window (.panel.window in the theme rules).
+local function HoleColor()
+	local c = S.Colors()
+	return c.panel[1], c.panel[2], c.panel[3], math_max(c.opacity, 0.88)
+end
+
 local function BakeGrid()
 	local p = plot
-	glColor(HOLE_BG[1], HOLE_BG[2], HOLE_BG[3], HOLE_BG[4])
+	glColor(HoleColor())
 	glRect(p.x1, p.y1, p.x2, p.y2)
 	glColor(PLOT_BG[1], PLOT_BG[2], PLOT_BG[3], PLOT_BG[4])
 	glRect(p.x1, p.y1, p.x2, p.y2)
@@ -635,12 +623,11 @@ local function BakeGrid()
 end
 
 -- Stacked columns: one rect per (column, band). With MAX_COLUMNS = 360 and at
--- most TOP_N + 2 bands this is well under 4k instances, baked once per refresh.
+-- most TOP_N + 2 bands this is well under 4k rects, baked once per refresh.
 --
--- The shapes are antialiased, so two rects that merely touch leave a faint
--- seam where their soft edges meet. To have none, the bands are drawn opaque,
--- on whole pixels, each column one pixel into the next and each band one pixel
--- into the one below it: what is drawn later simply covers the soft edge.
+-- The bands are drawn opaque, on whole pixels, each column one pixel into the
+-- next and each band one pixel into the one below it, so no seam shows
+-- between neighbours: what is drawn later simply covers the edge.
 local function BakeStack()
 	local p = plot
 	local hiddenSet = hidden[GROUPINGS[sel.group].key]
@@ -682,13 +669,21 @@ local function BakeLine()
 		k = k + 2
 	end
 	for i = #linePoints, k + 1, -1 do linePoints[i] = nil end
-	-- Dark halo under the bright line so it reads over any band colour
-	LineStrip(linePoints, LINE_WIDTH*uiScale + 2*uiScale, {0, 0, 0, 0.55})
+	-- Dark halo under the line so it reads over any band colour
+	LineStrip(linePoints, LINE_WIDTH*uiScale + 2*uiScale, LINE_HALO)
 	LineStrip(linePoints, LINE_WIDTH*uiScale, LINE_COLOR)
 end
 
-local function BuildPlotCache()
-	plotCache = TexCache(plotCache, plot.x1, plot.y1, plot.x2, plot.y2, function()
+local function FreePlotList()
+	if plotList then
+		glDeleteList(plotList)
+		plotList = nil
+	end
+end
+
+local function BuildPlotList()
+	FreePlotList()
+	plotList = glCreateList(function()
 		BakeGrid()
 		if view.enough then
 			BakeStack()
@@ -699,7 +694,7 @@ local function BuildPlotCache()
 end
 
 --------------------------------------------------------------------------------
--- the window 
+-- the window
 --------------------------------------------------------------------------------
 
 local function Hex(c)
@@ -752,7 +747,7 @@ local function BarRML(segs, total)
 end
 
 local function CaptionRML(label, modeKey, total)
-	return string.format('<span class="%s">%s</span>  now  <span class="n">%s</span> /s', modeKey, label, numFormat(total))
+	return string.format('<span class="%s">%s</span>  now  <span class="n">%s</span> /s', modeKey, hud.Escape(label), numFormat(total))
 end
 
 -- the lines of the box at the mouse
@@ -831,7 +826,7 @@ local function Refresh()
 	local res, mode = RESOURCES[sel.res], MODES[sel.mode]
 	local other = MODES[(sel.mode == 1) and 2 or 1]
 
-	page.SetText("title", res.label .. " " .. mode.label)
+	page.SetText("title", hud.Escape(res.label .. " " .. mode.label))
 	page.SetText("subtitle", "by " .. ((GROUPINGS[sel.group].key == "unit") and "unit" or "category") .. "  |  " .. mode.line .. " drawn as line")
 	page.SetText("window", view.enough and ("Window  " .. formatTime(view.t0) .. " - " .. formatTime(view.t1)) or "")
 	for gname, defs in pairs(GROUP_DEFS) do
@@ -892,6 +887,18 @@ local function Refresh()
 	RefreshTip()
 end
 
+-- The resource buttons, one per resource the game config lists. The coloured
+-- underline (.ul) shows on the active one in the resource's own colour.
+local function ResourcePicksRML()
+	local parts = {}
+	for i = 1, #RESOURCES do
+		local r = RESOURCES[i]
+		parts[i] = string.format('<div id="res%d" class="pick%s">%s<div class="ul" style="background-color: %s;"/></div>',
+			i, (i == #RESOURCES) and " last" or "", hud.Escape(r.label), r.color or "#a9bdd0")
+	end
+	return table.concat(parts)
+end
+
 --------------------------------------------------------------------------------
 -- open and close
 --------------------------------------------------------------------------------
@@ -902,9 +909,10 @@ end
 
 local function Place()
 	uiScale = hud.GetScale()
-	hud.PlacePanel(page.Element("econgraph"), LAYOUT_ID, PANEL_WIDTH, PANEL_HEIGHT, DefaultOrigin)
+	hud.PlacePanel(page.Element("econgraph"), LAYOUT_NAME, PANEL_WIDTH, PANEL_HEIGHT, DefaultOrigin)
 	plot = nil -- read again once RmlUi has laid the window out
 	plotDirty = true
+	pageDirty = true
 end
 
 local function Changed()
@@ -918,7 +926,7 @@ local function Open()
 	isOpen = true
 	hoverCol, hoverSeg, plot = nil, nil, nil
 	pcall(function() document:PullToFront() end)
-	PlayClickSound()
+	hud.Sound("click")
 	Changed()
 end
 
@@ -926,7 +934,7 @@ local function Close()
 	if not isOpen then return end
 	isOpen = false
 	hoverCol, hoverSeg = nil, nil
-	PlayClickSound()
+	hud.Sound("click")
 	Refresh()
 end
 
@@ -951,20 +959,37 @@ local function MorphUpdate(morphTable)
 end
 
 function widget:Initialize()
+	S = WG.Slate
+	if not S then
+		widgetHandler:RemoveWidget()
+		return
+	end
+	-- the resources the engine tracks per unit, in the game config's order
+	for _, r in ipairs(S.game.resources or {}) do
+		if UNIT_RESOURCE_SLOTS[r.key] then
+			RESOURCES[#RESOURCES + 1] = { key = r.key, label = r.label or r.key, color = r.color }
+		end
+	end
+	if #RESOURCES == 0 then
+		spEcho("[Slate Economy Graph] no metal or energy in slate_game.lua resources")
+		widgetHandler:RemoveWidget()
+		return
+	end
+
 	local helpers = include("slate/rml/core.lua")
 	local result, reason = helpers.LoadDocument(DOCUMENT_PATH, widget)
 	if not result then
-		spEcho("[Economy Graph] " .. tostring(reason))
-		widgetHandler:RemoveWidget(self)
+		spEcho("[Slate Economy Graph] " .. tostring(reason))
+		widgetHandler:RemoveWidget()
 		return
 	end
 	hud = helpers
 	document = result
-	BindDrawing()
 
 	page = hud.NewView(document)
 	page.Assume("econgraph", "hidden", true) -- set in the markup
 	page.Assume("tip", "hidden", true)
+	page.Element("res-picks").inner_rml = ResourcePicksRML()
 
 	hud.OnClick(page, "close", Close)
 	for gname, defs in pairs(GROUP_DEFS) do
@@ -972,7 +997,7 @@ function widget:Initialize()
 			hud.OnClick(page, gname .. i, function()
 				if sel[gname] ~= i then
 					sel[gname] = i
-					PlayClickSound()
+					hud.Sound("click")
 					Changed()
 				end
 			end)
@@ -985,7 +1010,7 @@ function widget:Initialize()
 		if b and event.parameters and event.parameters.button == 0 then
 			local hiddenSet = hidden[GROUPINGS[sel.group].key]
 			hiddenSet[b.key] = (not hiddenSet[b.key]) or nil
-			PlayClickSound()
+			hud.Sound("click")
 			Changed()
 		end
 	end)
@@ -1010,7 +1035,7 @@ function widget:Initialize()
 	-- false when the name is taken; then morphs stay attributed to the unit.
 	ownsMorphGlobal = widgetHandler:RegisterGlobal('MorphUpdate', MorphUpdate) and true or false
 	if not ownsMorphGlobal then
-		spEcho("[EconGraph] MorphUpdate global already owned; upgrade spend will show on the upgrading unit")
+		spEcho("[Slate Economy Graph] MorphUpdate global already owned; morph spend will show on the morphing unit")
 	end
 
 	WG.SlateEconGraph = {
@@ -1020,23 +1045,22 @@ function widget:Initialize()
 		IsOpen = function() return isOpen end,
 	}
 
-	hud.RegisterPanel(LAYOUT_ID, "Economy Graph", Place, function() return isOpen end)
+	hud.RegisterPanel(LAYOUT_NAME, "Economy Graph", Place, function() return isOpen end)
+	hud.OnChange(LAYOUT_NAME, Place)
 	Place()
 	hud.ShowPassive(document)
 end
 
 function widget:Shutdown()
 	if hud then
-		hud.UnregisterPanel(LAYOUT_ID)
+		hud.UnregisterPanel(LAYOUT_NAME)
+		hud.OffChange(LAYOUT_NAME)
 	end
-	if FreeCache then
-		FreeCache(plotCache)
-		plotCache = nil
-	end
+	FreePlotList()
 	if ownsMorphGlobal then widgetHandler:DeregisterGlobal('MorphUpdate') end
 	WG.SlateEconGraph = nil
 	if document then
-		document:Close()
+		hud.CloseDocument(document)
 		document = nil
 	end
 end
@@ -1046,7 +1070,6 @@ function widget:ViewResize()
 		hud.UpdateScale()
 		Place()
 		page.ForgetStyles()
-		pageDirty = true
 	end
 end
 
@@ -1077,8 +1100,6 @@ function widget:GameFrame(n)
 		pageDirty = true
 	end
 end
-
-local guiHidden = false
 
 function widget:Update()
 	if not document then
@@ -1119,10 +1140,10 @@ function widget:DrawScreen()
 		plot = rect
 		plotDirty = true
 	end
-	if plotDirty or not plotCache then
-		BuildPlotCache()
+	if plotDirty or not plotList then
+		BuildPlotList()
 	end
-	DrawCache(plotCache, plot.x1, plot.y1)
+	glCallList(plotList)
 
 	-- the column under the mouse, and a line across at the mouse's height
 	if hoverCol and view.enough and hoverCol <= view.nCols then
@@ -1135,5 +1156,4 @@ function widget:DrawScreen()
 		glRect(p.x1, my, p.x2, my+1)
 	end
 	glColor(1, 1, 1, 1)
-	Flush()
 end

@@ -5,14 +5,17 @@
 	<style>
 		/* The economy graph window. Its position is set from Lua
 		   (hud.PlacePanel); its size here must match PANEL_WIDTH and
-		   PANEL_HEIGHT in gui_bastion_econgraph.lua.
+		   PANEL_HEIGHT in slate_econgraph.lua.
 
 		   The plot itself (#plot) is drawn with gl by the widget, and the
-		   engine draws gl UNDER RmlUi. So the window has no background of its
-		   own: every part except #plot carries the panel color (class "fill")
-		   and the parts tile the window exactly, leaving #plot as a hole the
-		   gl drawing shows through. Use padding, not margins, between parts,
-		   or the map shows through the gaps. */
+		   engine draws gl UNDER RmlUi. So the window's own glass is turned
+		   off (an id rule beats .panel.window, including the theme rules
+		   appended at run time) and every part except #plot carries the
+		   glass instead (class "panel window fill"), tiling the window
+		   exactly and leaving #plot as a hole the gl drawing shows through.
+		   Use padding, not margins, between parts, or the map shows through
+		   the gaps. The gl side paints the hole in the same themed colour
+		   first (HoleColor in the widget). */
 		#econgraph {
 			position: absolute;
 			left: 0px;
@@ -20,11 +23,13 @@
 			width: 1180dp;
 			height: 700dp;
 			box-sizing: border-box;
-			border: 1dp rgba(255,255,255,36);
+			background-color: rgba(0, 0, 0, 0);
 			pointer-events: auto;
 		}
+		/* the parts keep only the dividers between them (set per id below) */
 		.fill {
-			background-color: rgba(11, 14, 18, 235);
+			border-width: 0dp;
+			border-radius: 0dp;
 		}
 		.grow {
 			flex: 1;
@@ -36,7 +41,8 @@
 			height: 50dp;
 			box-sizing: border-box;
 			padding: 0dp 14dp 0dp 16dp;
-			border-bottom: 1dp rgba(255,255,255,36);
+			border-bottom-width: 1dp;
+			border-radius: 7dp 7dp 0dp 0dp;
 		}
 		#subtitle {
 			margin-left: 14dp;
@@ -60,7 +66,8 @@
 			width: 250dp;
 			box-sizing: border-box;
 			padding: 4dp 12dp 0dp 16dp;
-			border-right: 1dp rgba(255,255,255,36);
+			border-right-width: 1dp;
+			border-radius: 0dp 0dp 0dp 7dp;
 		}
 		.sec {
 			height: 16dp;
@@ -82,7 +89,7 @@
 			color: #b5bac1;
 			background-color: rgba(255,255,255,10);
 			border: 1dp rgba(255,255,255,36);
-			border-bottom: 2dp rgba(255,255,255,36);
+			border-radius: 5dp;
 		}
 		.pick.last {
 			margin-right: 0dp;
@@ -94,12 +101,21 @@
 		.pick.active {
 			color: #f4f5f7;
 			background-color: rgba(255,255,255,18);
-			border-bottom: 2dp #a9bdd0;
+			border-color: #a9bdd0;
 		}
-		#res1.active { border-bottom: 2dp #a9c9ea; }
-		#res2.active { border-bottom: 2dp #f2d64b; }
-		#mode1.active { border-bottom: 2dp #ffb3a6; }
-		#mode2.active { border-bottom: 2dp #9be7a8; }
+		/* a coloured underline on the active resource and mode buttons: a
+		   block under the text, inside the 22dp the button has for content */
+		.ul {
+			height: 2dp;
+			margin: 0dp 6dp;
+			border-radius: 1dp;
+			opacity: 0;
+		}
+		.pick.active .ul {
+			opacity: 1;
+		}
+		#mode1 .ul { background-color: #ffb3a6; }
+		#mode2 .ul { background-color: #9be7a8; }
 		#now {
 			margin-top: 14dp;
 		}
@@ -114,6 +130,7 @@
 			height: 21dp;
 			padding: 0dp 4dp;
 			font-size: 12dp;
+			border-radius: 5dp;
 		}
 		.lrow:hover {
 			background-color: rgba(255,255,255,18);
@@ -123,6 +140,7 @@
 			height: 11dp;
 			margin-right: 7dp;
 			box-sizing: border-box;
+			border-radius: 2dp;
 		}
 		.lname {
 			flex: 1;
@@ -196,7 +214,8 @@
 			font-size: 12dp;
 			line-height: 14dp;
 		}
-		#end-line { color: #f4f5f7; }
+		/* the line's colour, as drawn in the plot */
+		#end-line { color: #d97731; }
 		#end-stack.use { color: #ffb3a6; }
 		#end-stack.make { color: #9be7a8; }
 		#nodata {
@@ -236,6 +255,7 @@
 			flex: 1;
 			box-sizing: border-box;
 			padding: 2dp 14dp 0dp 14dp;
+			border-radius: 0dp 0dp 7dp 0dp;
 		}
 		.cap {
 			height: 18dp;
@@ -253,8 +273,9 @@
 			display: flex;
 			flex-direction: row;
 			height: 22dp;
-			background-color: #0f1319;
+			background-color: rgba(0, 0, 0, 64);
 			border: 1dp rgba(255,255,255,36);
+			border-radius: 5dp;
 			box-sizing: border-box;
 			overflow: hidden;
 		}
@@ -287,16 +308,15 @@
 			pointer-events: none;
 			background-color: rgba(5, 7, 10, 240);
 			border: 1dp rgba(255,255,255,60);
+			border-radius: 5dp;
 		}
 		#tip .d { color: #b5bac1; }
 		#tip .n { color: #f4f5f7; }
 	</style>
 </head>
 <body>
-	<div id="econgraph" class="hidden">
-		
-		
-		<div id="head" class="fill">
+	<div id="econgraph" class="panel window hidden">
+		<div id="head" class="panel window fill">
 			<div id="title" class="title"/>
 			<div id="subtitle"/>
 			<div class="grow"/>
@@ -304,16 +324,13 @@
 			<div id="close" class="close">X</div>
 		</div>
 		<div id="main">
-			<div id="side" class="fill">
+			<div id="side" class="panel window fill">
 				<div class="sec label">Resource</div>
-				<div class="picks">
-					<div id="res1" class="pick">Metal</div>
-					<div id="res2" class="pick last">Energy</div>
-				</div>
+				<div id="res-picks" class="picks"/>
 				<div class="sec label">Show</div>
 				<div class="picks">
-					<div id="mode1" class="pick">Expense</div>
-					<div id="mode2" class="pick last">Income</div>
+					<div id="mode1" class="pick">Expense<div class="ul"/></div>
+					<div id="mode2" class="pick last">Income<div class="ul"/></div>
 				</div>
 				<div class="sec label">Group</div>
 				<div class="picks">
@@ -331,9 +348,9 @@
 				<div id="legend"/>
 			</div>
 			<div id="right">
-				<div id="right-top" class="fill"/>
+				<div id="right-top" class="panel window fill"/>
 				<div id="plotrow">
-					<div id="axis" class="fill">
+					<div id="axis" class="panel window fill">
 						<div id="ax0" class="tick"/>
 						<div id="ax1" class="tick"/>
 						<div id="ax2" class="tick"/>
@@ -344,12 +361,12 @@
 					<div id="plot">
 						<div id="nodata">Collecting economy samples...</div>
 					</div>
-					<div id="values" class="fill">
+					<div id="values" class="panel window fill">
 						<div id="end-stack" class="end"/>
 						<div id="end-line" class="end"/>
 					</div>
 				</div>
-				<div id="times" class="fill">
+				<div id="times" class="panel window fill">
 					<div id="times-inner">
 						<div id="tm0" class="time"/>
 						<div id="tm1" class="time"/>
@@ -359,7 +376,7 @@
 						<div id="tm5" class="time"/>
 					</div>
 				</div>
-				<div id="bars" class="fill">
+				<div id="bars" class="panel window fill">
 					<div id="cap1" class="cap"/>
 					<div id="bar1" class="live"/>
 					<div id="cap2" class="cap next"/>
