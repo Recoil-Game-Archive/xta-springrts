@@ -18,7 +18,7 @@
 	//******************
 	unitname=arm_flash;
 	unitnumber=32;
-	objectname=arm_flash.3do;
+	objectname=arm_flash.s3o;
 	corpse=arm_flash_dead;
 	buildpic=arm_flash.DDS;
 	soundcategory=ARM_TANK;
