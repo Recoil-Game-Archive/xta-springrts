@@ -112,11 +112,29 @@ local function ThemeRules()
 	return nil
 end
 
+-- Recoil's Document:AppendToStyleSheet builds the new sheet with the appended
+-- rules as the base and the document's own rules merged on top, so on equal
+-- specificity the file's rule wins, not the appended one. The theme's rules
+-- therefore need more specificity than anything in theme.rcss or a
+-- document's own <style>: every document body gets this id, and each
+-- generated rule is scoped under it (an id outweighs any number of classes).
+local THEME_ID = "slate-themed"
+
 local function ApplyTheme(document)
 	local rules = ThemeRules()
-	if rules and rules ~= "" and document.AppendToStyleSheet then
-		pcall(document.AppendToStyleSheet, document, rules)
+	if not (rules and rules ~= "" and document.AppendToStyleSheet) then
+		return
 	end
+	pcall(function() document.id = THEME_ID end)
+	-- "a, b { ... }" becomes "#id a, #id b { ... }"
+	local scoped = rules:gsub("([^\n{]+)(%s*{)", function(selectors, brace)
+		local parts = {}
+		for selector in selectors:gmatch("[^,]+") do
+			parts[#parts + 1] = "#" .. THEME_ID .. " " .. selector:match("^%s*(.-)%s*$")
+		end
+		return table.concat(parts, ", ") .. brace
+	end)
+	pcall(document.AppendToStyleSheet, document, scoped)
 end
 
 -- Loads a document into the shared context, with the fonts in place first so

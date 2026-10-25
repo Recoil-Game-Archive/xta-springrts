@@ -234,7 +234,6 @@
 			width: 440dp;
 			padding: 12dp 14dp;
 			box-sizing: border-box;
-			background-color: rgba(255,255,255,10);
 			border: 1dp #a9bdd0;
 			border-radius: 8dp;
 		}
@@ -331,7 +330,6 @@
 			width: 426dp;
 			padding: 14dp 16dp;
 			box-sizing: border-box;
-			background-color: rgba(255,255,255,10);
 			border: 1dp #a9bdd0;
 			border-radius: 8dp;
 		}
@@ -415,7 +413,7 @@
 			</div>
 
 			<div id="confirm-dim" class="hidden"/>
-			<div id="picker" class="hidden">
+			<div id="picker" class="popup hidden">
 				<div id="picker-title"/>
 				<div id="picker-search" class="field" data-act="field:pick"/>
 				<div id="picker-list"/>
@@ -424,7 +422,7 @@
 					<div id="picker-no" class="button quiet" data-act="pick-cancel">Cancel</div>
 				</div>
 			</div>
-			<div id="confirm" class="hidden">
+			<div id="confirm" class="popup hidden">
 				<div id="confirm-title"/>
 				<div id="confirm-lines"/>
 				<div id="confirm-note"/>

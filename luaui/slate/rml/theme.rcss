@@ -67,6 +67,12 @@ div {
 	background-color: rgba(13, 14, 16, 224);
 }
 
+/* a popup: a list or prompt drawn over other content (a dropdown's choices,
+   the keybind picker); solid enough to read whatever is behind it */
+.popup {
+	background-color: rgba(13, 14, 16, 240);
+}
+
 /* a panel inside a panel */
 .raised {
 	background-color: rgba(255, 255, 255, 18);

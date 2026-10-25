@@ -216,6 +216,7 @@ function S.ThemeRules()
 	local rules = {
 		".panel { background-color: " .. Rgba(p[1], p[2], p[3], opacity) .. "; border-color: " .. borderRgba .. "; }",
 		".panel.window { background-color: " .. Rgba(p[1], p[2], p[3], max(opacity, 0.88)) .. "; }",
+		".popup { background-color: " .. Rgba(p[1], p[2], p[3], max(opacity, 0.94)) .. "; }",
 		".raised, .tile, .close, .tab, .button { border-color: " .. borderRgba .. "; }",
 		".divider { background-color: " .. borderRgba .. "; }",
 		".window-head { border-bottom-color: " .. borderRgba .. "; }",
