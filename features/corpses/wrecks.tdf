@@ -1790,7 +1790,7 @@
 	world=All Worlds;
 	description=Wreckage;
 	category=arm_corpses;
-	object=arm_flash_dead;
+	object=arm_flash_dead.s3o;
 	featuredead=arm_flash_heap;
 	footprintx=2;
 	footprintz=2;
